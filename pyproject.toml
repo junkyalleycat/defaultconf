@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "defaultconf"
+version = "0.1"
+authors = [
+  { name="Drew Gochenaur" }
+]
+requires-python = ">=3.8"
+dependencies = [
+]
+
+[project.scripts]
+defaultconf = "defaultconf.defaultconf:main"
