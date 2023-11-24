@@ -10,7 +10,11 @@ authors = [
 ]
 requires-python = ">=3.8"
 dependencies = [
+    "pyyaml>=5.0",
+    "pyroute2",
+    "filelock"
 ]
 
 [project.scripts]
 defaultconf = "defaultconf.defaultconf:main"
+bsdroute = "defaultconf.bsdroute:main"
