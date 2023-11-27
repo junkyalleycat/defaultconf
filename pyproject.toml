@@ -18,3 +18,4 @@ dependencies = [
 [project.scripts]
 defaultconf = "defaultconf.defaultconf:main"
 bsdroute = "defaultconf.bsdroute:main"
+bsdnetlink = "defaultconf.bsdnetlink:main"

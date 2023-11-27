@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
-import logging
+from enum import Enum
 import sys
+import logging
 import ipaddress
 import os
 from collections import namedtuple
@@ -9,96 +10,7 @@ import socket
 from ctypes import *
 from textwrap import wrap
 
-PF_ROUTE = 17          # sys/socket.h
-SO_RERROR = 0x00020000 # sys/socket.h
-
-IF_NAMESIZE = 16       # net/if.h
-IFNAMSIZ = IF_NAMESIZE # net/if.h
-
-pid_t = c_int32        # sys/_types.h
-suseconds_t = c_long   # sys/_types.h
-time_t = c_int64       # x86/_types.h
-sa_family_t = c_uint8  # sys/_types.h
-in_port_t = c_uint16   # sys/types.h
-in_addr_t = c_uint32   # sys/types.h
-u_char = c_ubyte       # sys/types.h
-
-# sys/_timeval.h
-class timeval(Structure):
-
-    _fields_ = [
-        ('tv_sec', time_t),
-        ('tv_usec', suseconds_t)
-    ]
-
-# net/if_dl.h
-class sockaddr_dl(Structure):
-
-    _fields_ = [
-        ('sdl_len', u_char),
-        ('sdl_family', u_char),
-        ('sdl_index', c_ushort),
-        ('sdl_type', u_char),
-        ('sdl_nlen', u_char),
-        ('sdl_alen', u_char),
-        ('sdl_slen', u_char),
-        ('sdl_data', c_char*46)
-    ]
-
-# sys/socket.h
-class sockaddr(Structure):
-
-    _fields_ = [
-        ('sa_len', u_char),
-        ('sa_family', sa_family_t),
-        ('sa_data', c_char*14)
-    ]
-
-# netinet/in.h
-class in_addr(Structure):
-
-    _fields_ = [
-        ('s_addr', in_addr_t)
-    ]
-
-# netinet/in.h
-class sockaddr_in(Structure):
-
-    _fields_ = [
-        ('sin_len', c_uint8),
-        ('sin_family', sa_family_t),
-        ('sin_port', in_port_t),
-        ('sin_addr', in_addr),
-        ('sin_zero', c_char*8)
-    ]
-
-# netinet6/in6.h
-class in6_addr(Structure):
-
-    class __u6_addr(Union):
-
-        _fields_ = [
-            ('__u6_addr8', c_uint8*16),
-            ('__u6_addr16', c_uint16*8),
-            ('__u6_addr32', c_uint32*4)
-        ]
-
-    _anonymous_ = ('__u6_addr',)
-    _fields_ = [
-        ('__u6_addr', __u6_addr)
-    ]
-
-# netinet6/in6.h
-class sockaddr_in6(Structure):
-
-    _fields_ = [
-        ('sin6_len', c_uint8),
-        ('sin6_family', sa_family_t),
-        ('sin6_port', in_port_t),
-        ('sin6_flowinfo', c_uint32),
-        ('sin6_addr', in6_addr),
-        ('sin6_scope_id', c_uint32)
-    ]
+from .bsdcommon import *
 
 # net/route.h
 class rt_metrics(Structure):
@@ -138,208 +50,88 @@ class rt_msghdr(Structure):
         ('rtm_rmx', rt_metrics)
     ]
 
-# net/if.h
-class ifa_msghdr(Structure):
-
-    _fields_ = [
-        ('ifam_msglen', c_ushort),
-        ('ifam_version', u_char),
-        ('ifam_type', u_char),
-        ('ifam_addrs', c_int),
-        ('ifam_flags', c_int),
-        ('ifam_index', c_ushort),
-        ('_ifam_spare1', c_ushort),
-        ('ifam_metrics', c_int)
-    ]
-
-# net/if.h
-class if_data(Structure):
-
-    class __ifi_epoch(Union):
-
-        _fields_ = [
-            ('tt', time_t),
-            ('ph', c_uint64)
-        ]
-
-    class __ifi_lastchange(Union):
-
-        class ph(Structure):
-
-            _fields_ = [
-                ('ph1', c_uint64),
-                ('ph2', c_uint64)
-            ]
-
-        _anonymous_ = ('ph',)
-        _fields_ = [
-            ('tv', timeval),
-            ('ph', ph)
-        ]
-
-    _anonymous_ = ('__ifi_epoch', '__ifi_lastchange',)
-    _fields_ = [
-        ('ifi_type', c_uint8),
-        ('ifi_physical', c_uint8),
-        ('ifi_addrlen', c_uint8),
-        ('ifi_hdrlen', c_uint8),
-        ('ifi_link_state', c_uint8),
-        ('ifi_vhid', c_uint8),
-        ('ifi_datalen', c_uint16),
-        ('ifi_mtu', c_uint32),
-        ('ifi_metric', c_uint32),
-        ('ifi_baudrate', c_uint64),
-        ('ifi_ipackets', c_uint64),
-        ('ifi_ierrors', c_uint64),
-        ('ifi_opackets', c_uint64),
-        ('ifi_oerrors', c_uint64),
-        ('ifi_collisions', c_uint64),
-        ('ifi_ibytes', c_uint64),
-        ('ifi_obytes', c_uint64),
-        ('ifi_imcasts', c_uint64),
-        ('ifi_omcasts', c_uint64),
-        ('ifi_iqdrops', c_uint64),
-        ('ifi_oqdrops', c_uint64),
-        ('ifi_noproto', c_uint64),
-        ('ifi_hwassist', c_uint64),
-        ('__ifi_epoch', __ifi_epoch),
-        ('__ifi_lastchange', __ifi_lastchange)
-    ]
-
-# net/if.h
-class if_msghdr(Structure):
-
-    _fields_ = [
-        ('ifm_msglen', c_ushort),
-        ('ifm_version', u_char),
-        ('ifm_type', u_char),
-        ('ifm_addrs', c_int),
-        ('ifm_flags', c_int),
-        ('ifm_index', c_ushort),
-        ('_ifm_spare1', c_ushort),
-        ('ifm_data', if_data)
-    ]
-
-# net/if.h
-class ifma_msghdr(Structure):
-
-    _fields_ = [
-        ('ifmam_msglen', c_ushort),
-        ('ifmam_version', u_char),
-        ('ifmam_type', u_char),
-        ('ifmam_addrs', c_int),
-        ('ifmam_flags', c_int),
-        ('ifmam_index', c_ushort),
-        ('_ifmam_spare1', c_ushort)
-    ]
-
-# net/if.h
-class if_announcemsghdr(Structure):
-
-    _fields_ = [
-        ('ifan_msglen', c_ushort),
-        ('ifan_version', u_char),
-        ('ifan_type', u_char),
-        ('ifan_index', c_ushort),
-        ('ifan_name', c_char*IFNAMSIZ),
-        ('ifan_what', c_ushort)
-    ]
-
 # net/route.h
 RTM_VERSION = 5
 
 # net/route.h
-RTA_DST = 0x1
-RTA_GATEWAY = 0x2
-RTA_NETMASK = 0x4
-RTA_GENMASK = 0x8
-RTA_IFP = 0x10
-RTA_IFA = 0x20
-RTA_AUTHOR = 0x40
-RTA_BRD = 0x80
+class RTM_ADDR(Enum):
+    RTA_DST = 0x1
+    RTA_GATEWAY = 0x2
+    RTA_NETMASK = 0x4
+    RTA_GENMASK = 0x8
+    RTA_IFP = 0x10
+    RTA_IFA = 0x20
+    RTA_AUTHOR = 0x40
+    RTA_BRD = 0x80
 
 # net/route.h
-RTAX_DST = 0
-RTAX_GATEWAY = 1
-RTAX_NETMASK = 2
-RTAX_GENMASK = 3
-RTAX_IFP = 4
-RTAX_IFA = 5
-RTAX_AUTHOR = 6
-RTAX_BRD = 7
-RTAX_MAX = 8
+class RTM_FLAG(Enum):
+    RTF_UP = 0x1
+    RTF_GATEWAY = 0x2
+    RTF_HOST = 0x4
+    RTF_REJECT = 0x8
+    RTF_DYNAMIC = 0x10
+    RTF_MODIFIED = 0x20
+    RTF_DONE = 0x40
+    RTF_XRESOLVE = 0x200
+    RTF_LLINFO = 0x400
+    RTF_LLDATA = 0x400
+    RTF_STATIC = 0x800
+    RTF_BLACKHOLE = 0x1000
+    RTF_PROTO2 = 0x4000
+    RTF_PROTO1 = 0x8000
+    RTF_PROTO3 = 0x40000
+    RTF_FIXEDMTU = 0x80000
+    RTF_PINNED = 0x100000
+    RTF_LOCAL = 0x200000
+    RTF_BROADCAST = 0x400000
+    RTF_MULTICAST = 0x800000
+    RTF_STICKY = 0x10000000
+    RTF_GWFLAG_COMPAT = 0x80000000
 
 # net/route.h
-RTF_UP = 0x1
-RTF_GATEWAY = 0x2
-RTF_HOST = 0x4
-RTF_REJECT = 0x8
-RTF_DYNAMIC = 0x10
-RTF_MODIFIED = 0x20
-RTF_DONE = 0x40
-RTF_XRESOLVE = 0x200
-RTF_LLINFO = 0x400
-RTF_LLDATA = 0x400
-RTF_STATIC = 0x800
-RTF_BLACKHOLE = 0x1000
-RTF_PROTO2 = 0x4000
-RTF_PROTO1 = 0x8000
-RTF_PROTO3 = 0x40000
-RTF_FIXEDMTU = 0x80000
-RTF_PINNED = 0x100000
-RTF_LOCAL = 0x200000
-RTF_BROADCAST = 0x400000
-RTF_MULTICAST = 0x800000
-RTF_STICKY = 0x10000000
-RTF_GWFLAG_COMPAT = 0x80000000
-
-# net/route.h
-RTM_Type = namedtuple('RTM_Type', ['pretty', 'n', 'hdr_type'])
-RTM_ADD = RTM_Type('RTM_ADD', 0x1, rt_msghdr)
-RTM_DELETE = RTM_Type('RTM_DELETE', 0x2, rt_msghdr)
-RTM_CHANGE = RTM_Type('RTM_CHANGE', 0x3, rt_msghdr)
-RTM_GET = RTM_Type('RTM_GET', 0x4, rt_msghdr)
-RTM_LOSING = RTM_Type('RTM_LOSING', 0x5, rt_msghdr)
-RTM_REDIRECT = RTM_Type('RTM_REDIRECT', 0x6, rt_msghdr)
-RTM_MISS = RTM_Type('RTM_MISS', 0x7, rt_msghdr)
-RTM_LOCK = RTM_Type('RTM_LOCK', 0x8, rt_msghdr)
-RTM_RESOLVE = RTM_Type('RTM_RESOLVE', 0xb, rt_msghdr)
-RTM_NEWADDR = RTM_Type('RTM_NEWADDR', 0xc, ifa_msghdr)
-RTM_DELADDR = RTM_Type('RTM_DELADDR', 0xd, ifa_msghdr)
-RTM_IFINFO = RTM_Type('RTM_IFINFO', 0xe, if_msghdr)
-RTM_NEWMADDR = RTM_Type('RTM_NEWMADDR', 0xf, ifma_msghdr)
-RTM_DELMADDR = RTM_Type('RTM_DELMADDR', 0x10, ifma_msghdr)
-RTM_IFANNOUNCE = RTM_Type('RTM_IFANNOUNCE', 0x11, if_announcemsghdr)
-RTM_IEEE80211 = RTM_Type('RTM_IEEE80211', 0x12, if_announcemsghdr)
-
-rtm_types = {
-    RTM_ADD,
-    RTM_DELETE,
-    RTM_CHANGE,
-    RTM_GET,
-    RTM_LOSING,
-    RTM_REDIRECT,
-    RTM_MISS,
-    RTM_LOCK,
-    RTM_RESOLVE,
-    RTM_NEWADDR,
-    RTM_DELADDR,
-    RTM_IFINFO,
-    RTM_NEWMADDR,
-    RTM_DELMADDR,
-    RTM_IFANNOUNCE,
-    RTM_IEEE80211
-}
-
-rtm_types_n = { e.n: e for e in rtm_types }
+class RTM_TYPE(Enum):
+    RTM_ADD = 0x1
+    RTM_DELETE = 0x2
+    RTM_CHANGE = 0x3
+    RTM_GET = 0x4
+    RTM_LOSING = 0x5
+    RTM_REDIRECT = 0x6
+    RTM_MISS = 0x7
+    RTM_LOCK = 0x8
+    RTM_RESOLVE = 0xb
+    RTM_NEWADDR = 0xc
+    RTM_DELADDR = 0xd
+    RTM_IFINFO = 0xe
+    RTM_NEWMADDR = 0xf
+    RTM_DELMADDR = 0x10
+    RTM_IFANNOUNCE = 0x11
+    RTM_IEEE80211 = 0x12
 
 # net/route.h
 def SA_SIZE(sa):
-#    sa_len = int_cfield(bytes(sa), 0, sockaddr.sa_len)
     sa_len = sa.sa_len
     if sa_len == 0:
         return sizeof(c_long)
     return 1+((sa_len-1) | (sizeof(c_long)-1))
+
+rtm_hdr_types = {}
+rtm_hdr_types[RTM_TYPE.RTM_ADD] = rt_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_DELETE] = rt_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_CHANGE] = rt_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_GET] = rt_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_LOSING] = rt_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_REDIRECT] = rt_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_MISS] = rt_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_LOCK] = rt_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_RESOLVE] = rt_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_NEWADDR] = ifa_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_DELADDR] = ifa_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_IFINFO] = if_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_NEWMADDR] = ifma_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_DELMADDR] = ifma_msghdr
+rtm_hdr_types[RTM_TYPE.RTM_IFANNOUNCE] = if_announcemsghdr
+rtm_hdr_types[RTM_TYPE.RTM_IEEE80211] = if_announcemsghdr
 
 def ensure_buffer(source, offset, sz):
     if (len(source)-offset) >= sz:
@@ -349,9 +141,9 @@ def ensure_buffer(source, offset, sz):
     return buf, 0
 
 def get_rtm_addrs(buf, p, rtm_hdr_addrs):
-    rtm_addrs = [None]*RTAX_MAX
-    for i in range(RTAX_MAX):
-        if (rtm_hdr_addrs & (1<<i)) == 0:
+    rtm_addrs = {}
+    for rtm_addr in RTM_ADDR:
+        if (rtm_hdr_addrs & rtm_addr.value) == 0:
             continue
         # TODO avoid creating sockaddr (because buf might be smaller?)
         sa = sockaddr.from_buffer(buf, p)
@@ -376,13 +168,14 @@ def get_rtm_addrs(buf, p, rtm_hdr_addrs):
                 # code will loudly fail (index out of bounds)
                 # also, all examples collected so far are for a long aligned sockaddr_dl
                 logging.warning(f'sizeof(rta)[{sizeof(rta)}] < sa.sa_len[{sa.sa_len}]')
-            rtm_addrs[i] = rta
+            rtm_addrs[rtm_addr] = rta
         p += SA_SIZE(sa)
     return p, rtm_addrs
 
+# extract field as int without creating struct
 def int_cfield(buf, offset, cfield):
     p = offset+cfield.offset
-    return int.from_bytes(buf[p:p+cfield.size], byteorder='little')
+    return int.from_bytes(buf[p:p+cfield.size], byteorder=sys.byteorder)
 
 def pf_route_process(handler):
     s = socket.socket(PF_ROUTE, socket.SOCK_RAW, 0)
@@ -397,12 +190,9 @@ def pf_route_process(handler):
         assert rtm_msglen == len(buf)
         rtm_version = int_cfield(buf, p, rt_msghdr.rtm_version)
         assert rtm_version == RTM_VERSION
-        rtm_type_n = int_cfield(buf, p, rt_msghdr.rtm_type)
-        rtm_type = rtm_types_n.get(rtm_type_n)
-        if rtm_type is None:
-            logging.warning(f'unknown rtm_type: {rtm_type_n}')
-            continue
-        rtm_hdr = rtm_type.hdr_type.from_buffer(buf, p)
+        rtm_type = RTM_TYPE(int_cfield(buf, p, rt_msghdr.rtm_type))
+        rtm_hdr_type = rtm_hdr_types[rtm_type]
+        rtm_hdr = rtm_hdr_type.from_buffer(buf, p)
         p += sizeof(rtm_hdr)
         if type(rtm_hdr) is rt_msghdr:
             p, rtm_addrs = get_rtm_addrs(buf, p, rtm_hdr.rtm_addrs)
@@ -413,7 +203,7 @@ def pf_route_process(handler):
         elif type(rtm_hdr) is ifma_msghdr:
             p, rtm_addrs = get_rtm_addrs(buf, p, rtm_hdr.ifmam_addrs)
         elif type(rtm_hdr) is if_announcemsghdr:
-            rtm_addrs = [None]*RTAX_MAX
+            rtm_addrs = {}
         else:
             raise Exception(f'unknown rtm_hdr: {(type(rtm_hdr))}')
         assert p == rtm_msglen
@@ -423,20 +213,42 @@ def str_sockaddr(sa):
     if sa is None:
         return None
     elif type(sa) is sockaddr_dl:
-        if sa.sdl_alen == 0:
-            return f'link#{sa.sdl_index}'
-        else:
+        if sa.sdl_nlen != 0:
+            return sa.sdl_data[:sa.sdl_nlen].decode()
+        elif sa.sdl_alen != 0:
             return ':'.join(wrap(sa.sdl_data[:sa.sdl_alen].hex(), 2))
+        elif sa.sdl_index != 0:
+            return f'link#{sa.sdl_index}'
+        raise Exception()
     elif type(sa) is sockaddr_in:
         return str(ipaddress.ip_address(bytes(sa.sin_addr)))
     elif type(sa) is sockaddr_in6:
         return str(ipaddress.ip_address(bytes(sa.sin6_addr)))
     raise Exception(f'unknown sa type: {type(sa)}')
 
+def str_flags(flags, n):
+    flag_names = []
+    for flag in flags:
+        if n & flag.value:
+            flag_names.append(flag.name)
+    return '|'.join(flag_names)
+
 def main():
     def handler(rtm_type, rtm_hdr, rtm_addrs):
-        str_rtm_addrs = [str_sockaddr(e) for e in rtm_addrs]
-        print(f'{rtm_type.pretty} {str_rtm_addrs}')
+        str_rtm_addrs = {i[0].name: str_sockaddr(i[1]) for i in rtm_addrs.items()}
+        print(rtm_type.name)
+        print(f'  rtm_addrs={str_rtm_addrs}')
+        if type(rtm_hdr) is rt_msghdr:
+            str_rtm_flags = str_flags(RTM_FLAG, rtm_hdr.rtm_flags)
+            print(f'  rtm_flags={str_rtm_flags}')
+        elif type(rtm_hdr) is if_msghdr:
+            str_ifm_flags = str_flags(IFM_FLAG, rtm_hdr.ifm_flags)
+            print(f'  ifm_flags={str_ifm_flags}')
+            print(f'  ifm_index={rtm_hdr.ifm_index}')
+        elif type(rtm_hdr) is ifa_msghdr:
+            str_ifam_flags = str_flags(IFM_FLAG, rtm_hdr.ifam_flags)
+            print(f'  ifam_flags={str_ifam_flags}')
+            print(f'  ifam_index={rtm_hdr.ifam_index}')
         print()
         sys.stdout.flush()
 
