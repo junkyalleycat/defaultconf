@@ -25,6 +25,9 @@ class nlattr(Structure):
         ('nla_type', c_uint16)
     ]
 
+    def deepcopy(self):
+        return nlattr.from_buffer_copy(self)
+
 # netlink/route/route.h
 class rtmsg(Structure):
 
@@ -70,7 +73,7 @@ class snl_errmsg_data(Structure):
         ('orig_hdr', POINTER(nlmsghdr)),
         ('error', c_int),
         ('error_offs', c_uint32),
-        ('error_str', c_char_p),
+        ('error_str', POINTER(c_char)),
         ('cookie', POINTER(nlattr))
     ]
 
@@ -85,26 +88,36 @@ class snl_parsed_link_simple(Structure):
         ('ifla_ifname', POINTER(c_char))
     ]
 
+    def deepcopy(self):
+        copy = snl_parsed_link_simple.from_buffer_copy(self)
+        copy.ifla_ifname = create_string_buffer(string_at(self.ifla_ifname))
+        return copy
+
 # netlink/netlink_snl_route_parsers.h
 class rta_mpath(Structure):
 
     _fields_ = [
         ('num_nhops', c_uint32),
-        ('nhops', c_void_p) # NOTE POINTER(POINTER(rta_mpath_nh)))
+        ('nhops', c_void_p) # TODO POINTER(POINTER(rta_mpath_nh)))
     ]
+
+    def deepcopy(self):
+        copy = rta_mpath.from_buffer_copy(self)
+        copy.nhops = c_void_p() # TODO
+        return copy
 
 # netlink/netlink_snl.h
 class snl_state(Structure):
 
     _fields_ = [
         ('fd', c_int),
-        ('buf', c_char_p),
+        ('buf', POINTER(c_char)),
         ('off', size_t),
         ('bufsize', size_t),
         ('datalen', size_t),
         ('seq', c_uint32),
         ('init_done', c_bool),
-        ('lb', c_void_p) # NOTE POINTER(linear_buffer))
+        ('lb', c_void_p) # TODO POINTER(linear_buffer))
     ]
 
 # netlink/netlink_snl_route_parsers.h
@@ -130,6 +143,17 @@ class snl_parsed_route(Structure):
         ('rtm_dst_len', c_uint8)
     ]
 
+    def deepcopy(self):
+        copy = snl_parsed_route.from_buffer_copy(self)
+        if self.rta_dst:
+            copy.rta_dst = pointer(self.rta_dst.contents.deepcopy())
+        if self.rta_gw:
+            copy.rta_gw = pointer(self.rta_gw.contents.deepcopy())
+        if self.rta_metrics:
+            copy.rta_metrics = pointer(self.rta_metrics.contents.deepcopy())
+        self.rta_multipath = self.rta_multipath.deepcopy()
+        return copy
+
 # netlink/netlink_snl_route_parsers.h
 class snl_parsed_addr(Structure):
 
@@ -140,11 +164,23 @@ class snl_parsed_addr(Structure):
         ('ifa_local', POINTER(sockaddr)),
         ('ifa_address', POINTER(sockaddr)),
         ('ifa_broadcast', POINTER(sockaddr)),
-        ('ifa_label', c_char_p),
-        ('ifa_cacheinfo', c_void_p), # NOTE POINTER(ifa_cacheinfo)),
+        ('ifa_label', POINTER(c_char)),
+        ('ifa_cacheinfo', c_void_p), # TODO POINTER(ifa_cacheinfo)),
         ('ifaf_vhid', c_uint32),
         ('ifaf_flags', c_uint32)
     ]
+
+    def deepcopy(self):
+        copy = snl_parsed_addr.from_buffer_copy(self)
+        if self.ifa_local:
+            copy.ifa_local = pointer(self.ifa_local.contents.deepcopy())
+        if self.ifa_address:
+            copy.ifa_address = pointer(self.ifa_address.contents.deepcopy())
+        if self.ifa_broadcast:
+            copy.ifa_broadcast = pointer(self.ifa_broadcast.contents.deepcopy())
+        copy.ifa_label = create_string_buffer(string_at(self.ifa_label))
+        self.ifa_cacheinfo = c_void_p() # TODO
+        return copy
 
 class SNL:
 
@@ -156,7 +192,6 @@ class SNL:
         # (puts socket into non-blocking and uses select, which means the timeout is near 0)
         if read_timeout is not None:
             timeout = timeval(tv_sec=read_timeout, tv_usec=0)
-
             self.ss_s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, timeout)
 
     def get_socket(self):
@@ -172,25 +207,13 @@ class SNL:
         snl_send_message(addressof(self.ss), addressof(hdr))
 
     def read_message(self):
-        _msg = snl_read_message(addressof(self.ss))
-        hdr = nlmsghdr.from_address(_msg)
-        # TODO is there a cleaner way to do this?
-        msg = (c_char*hdr.nlmsg_len)()
-        memmove(msg, _msg, hdr.nlmsg_len)
-        return msg
+        return c_void_p(snl_read_message(addressof(self.ss)))
 
     def read_reply_multi(self, nlmsg_seq, e):
-        _msg = snl_read_reply_multi(addressof(self.ss), nlmsg_seq, addressof(e))
-        if not _msg:
-            return None
-        hdr = nlmsghdr.from_address(_msg)
-        # TODO is there a cleaner way to do this?
-        msg = (c_char*hdr.nlmsg_len)()
-        memmove(msg, _msg, hdr.nlmsg_len)
-        return msg
+        return c_void_p(snl_read_reply_multi(addressof(self.ss), nlmsg_seq, addressof(e)))
 
     def parse_nlmsg(self, hdr, parser, target):
-        return snl_parse_nlmsg(addressof(self.ss), addressof(hdr), parser, addressof(target))
+        return snl_parse_nlmsg(addressof(self.ss), hdr.value, parser, addressof(target))
 
     def __del__(self):
         snl_free(addressof(self.ss))

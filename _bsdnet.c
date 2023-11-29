@@ -64,7 +64,11 @@ static PyObject* bsdnet_snl_read_reply_multi(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "LiL", &ss, &nlmsg_seq, &e)) {
         return NULL;
     }
-    return PyLong_FromVoidPtr(snl_read_reply_multi(ss, nlmsg_seq, e));
+    void* msg;
+    Py_BEGIN_ALLOW_THREADS
+    msg = snl_read_reply_multi(ss, nlmsg_seq, e);
+    Py_END_ALLOW_THREADS
+    return PyLong_FromVoidPtr(msg);
 }
 
 static PyObject* bsdnet_snl_parse_nlmsg(PyObject* self, PyObject* args) {
@@ -83,12 +87,15 @@ static PyObject* bsdnet_snl_read_message(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "L", &ss)) {
         return NULL;
     }
-    struct nlmsghdr* hdr;
-    if (!(hdr = snl_read_message(ss))) {
+    void* msg;
+    Py_BEGIN_ALLOW_THREADS
+    msg = snl_read_message(ss);
+    Py_END_ALLOW_THREADS
+    if (!msg) {
         PyErr_SetFromErrno(PyExc_OSError);
         return NULL;
     }
-    return PyLong_FromVoidPtr(hdr); 
+    return PyLong_FromVoidPtr(msg); 
 }
 
 static PyMethodDef bsdnet_methods[] = {

@@ -42,6 +42,13 @@ class sockaddr(Structure):
         ('sa_data', c_char*14)
     ]
 
+    # need to copy sa_len, not sizeof(sockaddr)
+    def deepcopy(self):
+        copy = create_string_buffer(self.sa_len)
+        # TODO why the pointer?  should be automatic
+        memmove(copy, addressof(self), self.sa_len)
+        return sockaddr.from_buffer(copy)
+
 # netinet/in.h
 class in_addr(Structure):
 
