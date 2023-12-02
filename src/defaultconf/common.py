@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import signal
+import os
 import contextlib
 import time
 import socket
@@ -50,7 +52,7 @@ class GatewaySelect(namedtuple('GatewaySelect', ['af', 'link', 'protocol'],
     @staticmethod
     def from_data(data):
         kwargs = dict(data)
-        if 'af' in data:
+        if data.get('af') is not None:
             kwargs['af'] = socket.AddressFamily[data['af']]
         return GatewaySelect(**kwargs)
 
@@ -180,7 +182,7 @@ def try_signal_daemon(config, *, ignore_failure=None):
     try:
         pid = int(config.pid_path.read_text())
         os.kill(pid, signal.SIGUSR1)
-    except:
+    except ProcessLookupError:
         if not ignore_failure:
             raise
 
