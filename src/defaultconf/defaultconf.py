@@ -28,40 +28,48 @@ def validate_protocol(protocol):
 def default_sort_strategy(e):
     return e.ts
 
-class Gateway(namedtuple('Gateway', ['af', 'iface', 'protocol', 'addr', 'ts'])):
+class Gateway(namedtuple('Gateway', ['af', 'link', 'protocol', 'addr', 'ts'])):
 
     @staticmethod
     def from_data(data):
         kwargs = dict(data)
+        kwargs['af'] = socket.AddressFamily[data['af']]
         kwargs['addr'] = ipaddress.ip_address(data['addr'])
         return Gateway(**kwargs)
 
     def to_data(self):
         data = self._asdict()
+        data['af'] = self.af.name
         data['addr'] = str(self.addr)
         return data
 
-class GatewaySelect(namedtuple('GatewaySelect', ['af', 'iface', 'protocol'],
+class GatewaySelect(namedtuple('GatewaySelect', ['af', 'link', 'protocol'],
             defaults=[None, None, None])):
 
     def matches(self, o):
         if self.af is not None:
             if self.af != o.af:
                 return False
-        if self.iface is not None:
-            if self.iface != o.iface:
+        if self.link is not None:
+            if self.link != o.link:
                 return False
         if self.protocol is not None:
             if self.protocol != o.protocol:
                 return False
         return True
 
-    def to_data(self):
-        return self._asdict()
-
     @staticmethod
     def from_data(data):
-        return GatewaySelect(**data)
+        kwargs = dict(data)
+        if 'af' in data:
+            kwargs['af'] = socket.AddressFamily[data['af']]
+        return GatewaySelect(**kwargs)
+
+    def to_data(self):
+        data = self._asdict()
+        if self.af:
+            data['af'] = self.af.name
+        return data
 
 class Config(namedtuple('Config', ['state_path', 'priority', 'pid_path'],
             defaults=[default_state_path, [], default_pid_path])):
@@ -81,10 +89,10 @@ class Config(namedtuple('Config', ['state_path', 'priority', 'pid_path'],
 class State(namedtuple('State', ['gateways', 'disabled'],
             defaults=[set(), set()])):
 
-    def add(self, af, iface, protocol, addr):
+    def add(self, af, link, protocol, addr):
         # remove any other gateways that look like me
-        self.remove(GatewaySelect(af, iface, protocol))
-        self.gateways.update({Gateway(af, iface, protocol, addr, time.time())})
+        self.remove(GatewaySelect(af, link, protocol))
+        self.gateways.update({Gateway(af, link, protocol, addr, time.time())})
 
     def remove(self, select):
         matches = set(filter(select.matches, self.gateways))
@@ -179,10 +187,10 @@ class DefaultConf:
         return defaults
 
 def parse_af(af):
-    if af == 'ip':
-        return int(socket.AF_INET)
-    elif af == 'ip6':
-        return int(socket.AF_INET6)
+    if af == 'inet':
+        return socket.AF_INET
+    elif af == 'inet6':
+        return socket.AF_INET6
     raise Exception(f'unknown af: {af}')
 
 def main():
@@ -191,24 +199,24 @@ def main():
     subparsers = parser.add_subparsers(dest='action')
     subparser = subparsers.add_parser('add')
     subparser.add_argument('-f', metavar='address-family', required=True)
-    subparser.add_argument('-i', metavar='iface', required=True)
+    subparser.add_argument('-l', metavar='link', required=True)
     subparser.add_argument('-p', metavar='protocol', required=True)
     subparser.add_argument('addr', metavar='address')
     subparser = subparsers.add_parser('remove')
     subparser.add_argument('-f', metavar='address-family')
-    subparser.add_argument('-i', metavar='iface')
+    subparser.add_argument('-l', metavar='link')
     subparser.add_argument('-p', metavar='protocol')
     subparser = subparsers.add_parser('get-default')
     subparser.add_argument('-f', metavar='address-family')
-    subparser.add_argument('-i', metavar='iface')
+    subparser.add_argument('-l', metavar='link')
     subparser.add_argument('-p', metavar='protocol')
     subparser = subparsers.add_parser('disable')
     subparser.add_argument('-f', metavar='address-family')
-    subparser.add_argument('-i', metavar='iface')
+    subparser.add_argument('-l', metavar='link')
     subparser.add_argument('-p', metavar='protocol')
     subparser = subparsers.add_parser('enable')
     subparser.add_argument('-f', metavar='address-family')
-    subparser.add_argument('-i', metavar='iface')
+    subparser.add_argument('-l', metavar='link')
     subparser.add_argument('-p', metavar='protocol')
     subparser = subparsers.add_parser('daemon')
     subparser = subparsers.add_parser('signal-daemon')
@@ -227,26 +235,26 @@ def main():
         af = parse_af(args.f)    
         addr = ipaddress.ip_address(args.addr)
         with State.update(config) as state:
-            state.add(af, args.i, args.p, addr)
+            state.add(af, args.l, args.p, addr)
     elif args.action == 'remove':
         af = parse_af(args.f)
         with State.update(config) as state:
-            state.remove(GatewaySelect(af, args.i, args.p))
+            state.remove(GatewaySelect(af, args.l, args.p))
     elif args.action == 'get-default':
         af = None if args.f is None else parse_af(args.f)
         default_conf = DefaultConf(config)
-        select = GatewaySelect(af, args.i, args.p)
+        select = GatewaySelect(af, args.l, args.p)
         default = next(iter(default_conf.get_defaults(select)), None)
         if default is not None:
             print(json.dumps(default.to_data()))
     elif args.action == 'enable':
         af = None if args.f is None else parse_af(args.f)
         with State.update(config) as state:
-            state.enable(GatewaySelect(af, args.i, args.p))
+            state.enable(GatewaySelect(af, args.l, args.p))
     elif args.action == 'disable':
         af = None if args.f is None else parse_af(args.f)
         with State.update(config) as state:
-            state.disable(GatewaySelect(af, args.i, args.p))
+            state.disable(GatewaySelect(af, args.l, args.p))
     else:
         raise Exception(f'unknown action: {args.action}')
 

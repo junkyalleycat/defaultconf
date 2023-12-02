@@ -86,7 +86,7 @@ def daemon(config):
                 found_default = None
                 for default in defaults:
                     try:
-                        linkaddrs, = nettables.get_links(lambda l: l.link.name == default.iface)
+                        linkaddrs, = nettables.get_links(lambda l: l.link.name == default.link)
                     except ValueError:
                         # catch too few and too many
                         continue
