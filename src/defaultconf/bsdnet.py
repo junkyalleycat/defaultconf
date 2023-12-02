@@ -207,13 +207,23 @@ class SNL:
         snl_send_message(addressof(self.ss), addressof(hdr))
 
     def read_message(self):
-        return c_void_p(snl_read_message(addressof(self.ss)))
+        _hdr = c_void_p(snl_read_message(addressof(self.ss)))
+        return _hdr if _hdr else None
 
-    def read_reply_multi(self, nlmsg_seq, e):
-        return c_void_p(snl_read_reply_multi(addressof(self.ss), nlmsg_seq, addressof(e)))
+    def read_reply_multi(self, nlmsg_seq):
+        e = snl_errmsg_data()
+        _hdr = c_void_p(snl_read_reply_multi(addressof(self.ss), nlmsg_seq, addressof(e)))
+        if e.error != 0:
+            if e.error_str:
+                error_msg = string_at(e.error_str)
+                raise Exception(f'error[{e.error}]: {error_msg}')
+            else:
+                raise Exception(f'error[{e.error}]')
+        return _hdr if _hdr else None
 
     def parse_nlmsg(self, hdr, parser, target):
-        return snl_parse_nlmsg(addressof(self.ss), hdr.value, parser, addressof(target))
+        if not snl_parse_nlmsg(addressof(self.ss), hdr.value, parser, addressof(target)):
+            raise Exception()
 
     def __del__(self):
         snl_free(addressof(self.ss))

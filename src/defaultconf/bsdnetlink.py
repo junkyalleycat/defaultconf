@@ -14,13 +14,6 @@ import json
 
 from .bsdnet import *
 
-def flat_print(i):
-    for field_name, field_type in i._fields_:
-        value = getattr(i, field_name)
-        if value and (field_type == POINTER(sockaddr)):
-            value = parse_addr(value.contents)
-        print(f'{field_name} = {value}')
-
 def parse_addr(addr):
     if addr.sa_family == socket.AF_INET:
         addr_in = sockaddr_in.from_address(addressof(addr))
@@ -46,10 +39,8 @@ def dump_links():
     msg.hdr.nlmsg_len = sizeof(msg)
 
     snl.send_message(msg.hdr)
-
-    e = snl_errmsg_data()
-    while rmsg := snl.read_reply_multi(msg.hdr.nlmsg_seq, e):
-        yield parse_nlmsg_link(snl, rmsg)
+    while _hdr := snl.read_reply_multi(msg.hdr.nlmsg_seq):
+        yield parse_nlmsg_link(snl, _hdr)
         snl.clear_lb()
 
 def dump_addrs():
@@ -67,10 +58,8 @@ def dump_addrs():
     msg.hdr.nlmsg_len = sizeof(msg)
 
     snl.send_message(msg.hdr)
-
-    e = snl_errmsg_data()
-    while rmsg := snl.read_reply_multi(msg.hdr.nlmsg_seq, e):
-        yield parse_nlmsg_addr(snl, rmsg)
+    while _hdr := snl.read_reply_multi(msg.hdr.nlmsg_seq):
+        yield parse_nlmsg_addr(snl, _hdr)
         snl.clear_lb()
 
 def dump_routes():
@@ -94,43 +83,32 @@ def dump_routes():
     msg.hdr.nlmsg_len = sizeof(msg)
 
     snl.send_message(msg.hdr)
-
-    e = snl_errmsg_data()
-    while rmsg := snl.read_reply_multi(msg.hdr.nlmsg_seq, e):
-        yield parse_nlmsg_route(snl, rmsg)
+    while _hdr := snl.read_reply_multi(msg.hdr.nlmsg_seq):
+        yield parse_nlmsg_route(snl, _hdr)
         snl.clear_lb()
 
-def parse_nlmsg_link(snl_helper, rmsg):
+def parse_nlmsg_link(snl, _hdr):
     link = snl_parsed_link_simple()
-
-    if not snl_helper.parse_nlmsg(rmsg, snl_rtm_link_parser_simple, link):
-        raise Exception()
-
+    snl.parse_nlmsg(_hdr, snl_rtm_link_parser_simple, link)
     return link.deepcopy()
 
-def parse_nlmsg_addr(snl_helper, rmsg):
+def parse_nlmsg_addr(snl, _hdr):
     addr = snl_parsed_addr()
-
-    if not snl_helper.parse_nlmsg(rmsg, snl_rtm_addr_parser, addr):
-        raise Exception()
-
+    snl.parse_nlmsg(_hdr, snl_rtm_addr_parser, addr)
     return addr.deepcopy()
 
-def parse_nlmsg_route(snl_helper, rmsg):
+def parse_nlmsg_route(snl, _hdr):
     route = snl_parsed_route()
-
-    if not snl_helper.parse_nlmsg(rmsg, snl_rtm_route_parser, route):
-        raise Exception()
-
+    snl.parse_nlmsg(_hdr, snl_rtm_route_parser, route)
     return route.deepcopy()
 
-def parse_nlmsg(h_ss_cmd, nlmsg_type, rmsg):
+def parse_nlmsg(snl, nlmsg_type, _hdr):
     if nlmsg_type in (RTM_NEWLINK, RTM_DELLINK):
-        nlmsg = parse_nlmsg_link(h_ss_cmd, rmsg)
+        nlmsg = parse_nlmsg_link(snl, _hdr)
     elif nlmsg_type in (RTM_NEWADDR, RTM_DELADDR):
-        nlmsg = parse_nlmsg_addr(h_ss_cmd, rmsg)
+        nlmsg = parse_nlmsg_addr(snl, _hdr)
     elif nlmsg_type in (RTM_NEWROUTE, RTM_DELROUTE):
-        nlmsg = parse_nlmsg_route(h_ss_cmd, rmsg)
+        nlmsg = parse_nlmsg_route(snl, _hdr)
     else:
         raise Exception(f'unsupported nlmsg_type: {nlmsg_type}')
     return nlmsg
@@ -152,46 +130,50 @@ def monitor_nl(ev, handler):
         snl_event.get_socket().setsockopt(SOL_NETLINK, NETLINK_ADD_MEMBERSHIP, group)
 
     while not ev.is_set():
-        rmsg = None
+        _hdr = None
         try:
-            rmsg = snl_event.read_message()
+            _hdr = snl_event.read_message()
         except BlockingIOError:
             pass
-        if rmsg: # is not None:
-            hdr = nlmsghdr.from_address(rmsg.value)
-            nlmsg = parse_nlmsg(snl_helper, hdr.nlmsg_type, rmsg)
+        if _hdr: # is not None:
+            hdr = nlmsghdr.from_address(_hdr.value)
+            nlmsg = parse_nlmsg(snl_helper, hdr.nlmsg_type, _hdr)
             handler(hdr.nlmsg_type, nlmsg)
             snl_helper.clear_lb()
             snl_event.clear_lb()
 
-class Link(namedtuple('Link', ['ifname', 'index', 'up'])):
+class Link(namedtuple('Link', ['name', 'index', 'up'])):
 
     @staticmethod
     def from_snl_parsed_link_simple(s):
-        ifname = string_at(s.ifla_ifname).decode()
+        name = string_at(s.ifla_ifname).decode()
         up_flag = bool(s.ifi_flags & IFF_UP)
-        return Link(ifname, s.ifi_index, up_flag) 
+        return Link(name, s.ifi_index, up_flag) 
 
-class LinkAddress(namedtuple('IfAddress', ['if_index', 'local', 'address', 'prefixlen'])):
+class LinkAddress(namedtuple('LinkAddress', ['link_index', 'local', 'address', 'prefixlen'])):
 
     @staticmethod
     def from_snl_parsed_addr(s):
         local = parse_addr(s.ifa_local.contents) if s.ifa_local else None
-        address = parse_addr(s.ifa_address.contents)
-        return LinkAddress(s.ifa_index, local, address, s.ifa_prefixlen)
+        addr = parse_addr(s.ifa_address.contents)
+        ifaceaddr = ipaddress.ip_interface((addr, s.ifa_prefixlen,))
+        print(LinkAddress(s.ifa_index, local, ifaceaddr, s.ifa_prefixlen))
+        return LinkAddress(s.ifa_index, local, ifaceaddr, s.ifa_prefixlen)
 
-class Route(namedtuple('Route', ['dst', 'gw', 'prefixlen', 'if_index', 'host'])):
+class Route(namedtuple('Route', ['dst', 'gw', 'prefixlen', 'link_index', 'host'])):
 
     @staticmethod
     def from_snl_parsed_route(s):
         if s.rta_multipath.num_nhops != 0:
             raise Exception()
+        host_flag = bool(s.rta_rtflags & RTF_HOST)
         dst = parse_addr(s.rta_dst.contents)
+        if not host_flag:
+            dst = ipaddress.ip_network((dst, s.rtm_dst_len,))
         if s.rta_rtflags & RTF_GATEWAY:
             gw = parse_addr(s.rta_gw.contents)
         else:
             gw = None
-        host_flag = bool(s.rta_rtflags & RTF_HOST)
         return Route(dst, gw, s.rtm_dst_len, s.rta_oif, host_flag)
 
 class NetTables:
@@ -199,36 +181,53 @@ class NetTables:
     LinkAddresses = namedtuple('LinkAddresses', ['link', 'addrs'])
 
     def __init__(self):
+        self.lock = threading.RLock()
         self.links = {}
         self.routes = set()
 
     def new_link(self, link):
-        if link.index in self.links:
-            addrs = self.links[link.index].addrs
-            self.links[link.index] = NetTables.LinkAddresses(link, addrs)
-        else:
-            self.links[link.index] = NetTables.LinkAddresses(link, [])
+        with self.lock:
+            if link.index in self.links:
+                addrs = self.links[link.index].addrs
+                self.links[link.index] = NetTables.LinkAddresses(link, addrs)
+            else:
+                self.links[link.index] = NetTables.LinkAddresses(link, set())
 
     def del_link(self, link):
-        if link.index in self.links:
-            del self.links[link.index]
-        if_routes = set(filter(lambda e: e.if_index == link.index, self.routes))
-        self.routes -= if_routes
+        with self.lock:
+            if link.index in self.links:
+                del self.links[link.index]
+            self.routes.difference_update(set(filter(lambda e: e.link_index == link.index, self.routes)))
 
     def new_addr(self, a):
-        link = self.links[a.if_index]
-        link.addrs.append(a)
+        with self.lock:
+            link = self.links[a.link_index]
+            link.addrs.update({a})
 
     def del_addr(self, a):
-        link = self.links[a.if_index]
-        if a in link.addrs:
-            link.addrs.remove(a)
+        with self.lock:
+            link = self.links[a.link_index]
+            link.addrs.difference_update({a})
 
+    def get_links(self, p):
+        with self.lock:
+            return list(filter(p, self.links.values()))
+
+    # TODO filter out pinned routes, we can't control them anyways
     def new_route(self, r):
-        self.routes |= {r}
+        with self.lock:
+            self.routes |= {r}
 
     def del_route(self, r):
-        self.routes -= {r}
+        with self.lock:
+            self.routes -= {r}
+
+    def get_routes(self, p):
+        with self.lock:
+            return set(filter(p, self.routes))
+
+    def get_link_addrs(self):
+        return dict(self.links)
 
 class JSONEncoder(json.JSONEncoder):
 
@@ -243,22 +242,7 @@ class JSONEncoder(json.JSONEncoder):
             return list(o)
         return json.JSONEncoder.default(self, o)
 
-def main():
-    print(f'pid: {os.getpid()}')
-    finish = threading.Event()
-
-    def sig_handler(*_):
-        finish.set()
-    signal.signal(signal.SIGTERM, sig_handler)
-    signal.signal(signal.SIGINT, sig_handler)
-
-    def sigusr1_handler(*_):
-        try:
-            Path('/tmp/rtable').write_text(json.dumps(nt, cls=JSONEncoder))
-        except Exception as e:
-            logging.exception(e)
-    signal.signal(signal.SIGUSR1, sigusr1_handler)
-
+def maintain_nettables(finish, trigger_ev, nettables):
     executor = concurrent.futures.ThreadPoolExecutor()
     tasks = []
     tasks.append(executor.submit(finish.wait))
@@ -268,14 +252,14 @@ def main():
         nlmsg_q.put((nlmsg_type, nlmsg,))
     tasks.append(executor.submit(monitor_nl, finish, handler))
 
-    # close the gap
-    nt = NetTables()
+    # TODO close the gap
     for link in dump_links():
-        nt.new_link(Link.from_snl_parsed_link_simple(link))
+        nettables.new_link(Link.from_snl_parsed_link_simple(link))
     for addr in dump_addrs():
-        nt.new_addr(LinkAddress.from_snl_parsed_addr(addr))
+        nettables.new_addr(LinkAddress.from_snl_parsed_addr(addr))
     for route in dump_routes():
-        nt.new_route(Route.from_snl_parsed_route(route))
+        nettables.new_route(Route.from_snl_parsed_route(route))
+    trigger_ev.release()
 
     def nlmsg_handler():
         while not finish.is_set():
@@ -284,17 +268,20 @@ def main():
             except queue.Empty:
                 continue
             if nlmsg_type == RTM_NEWLINK:
-                nt.new_link(Link.from_snl_parsed_link_simple(nlmsg))
+                nettables.new_link(Link.from_snl_parsed_link_simple(nlmsg))
             elif nlmsg_type == RTM_DELLINK:
-                nt.del_link(Link.from_snl_parsed_link_simple(nlmsg))
+                nettables.del_link(Link.from_snl_parsed_link_simple(nlmsg))
             elif nlmsg_type == RTM_NEWADDR:
-                nt.new_addr(LinkAddress.from_snl_parsed_addr(nlmsg))
+                nettables.new_addr(LinkAddress.from_snl_parsed_addr(nlmsg))
             elif nlmsg_type == RTM_DELADDR:
-                nt.del_addr(LinkAddress.from_snl_parsed_addr(nlmsg))
+                nettables.del_addr(LinkAddress.from_snl_parsed_addr(nlmsg))
             elif nlmsg_type == RTM_NEWROUTE:
-                nt.new_route(Route.from_snl_parsed_route(nlmsg))
+                nettables.new_route(Route.from_snl_parsed_route(nlmsg))
             elif nlmsg_type == RTM_DELROUTE:
-                nt.del_route(Route.from_snl_parsed_route(nlmsg))
+                nettables.del_route(Route.from_snl_parsed_route(nlmsg))
+            else:
+                logging.error(f'unknown nlmsg_type: {nlmsg_type}')
+            trigger_ev.release()
     tasks.append(executor.submit(nlmsg_handler))
 
     try:

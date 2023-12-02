@@ -1,92 +1,48 @@
 #!/usr/bin/env python3
 
+import contextlib
+import time
+import logging
 import socket
 from collections import namedtuple
-import subprocess
 import argparse
 import ipaddress
 import yaml
 import json
 from pathlib import Path
-import hashlib
+import filelock 
 
-import lockfile 
+from . import daemon
+from . import bsdnetlink
 
-default_run_path = Path('/var/run/defaultconf')
-default_runcfg_path = Path('/var/db/defaultconf.json')
+default_config_path = Path('/usr/local/etc/defaultconf.yaml')
+default_state_path = Path('/var/db/defaultconf.state')
+default_pid_path = Path('/var/run/defaultconf.pid')
 
 default_protocols = {'static', 'dhcp', 'ppp', 'ra'}
 def validate_protocol(protocol):
     protocols = default_protocols
-    if protocol in protocols:
-        return True
-    raise Exception(f'unknown protocol: {protocol}')
-
-def calc_hash(s):
-    m = hashlib.sha256()
-    m.update(s.encode())
-    return m.hexdigest()
-
-def read_config(runcfg_path):
-    if runcfg_path.exists():
-        config = json.loads(runcfg_path.read_text())
-    else:
-        config = {}
-    config['_original_hash'] = calc_hash(json.dumps(config, sort_keys=True))
-    return config
-
-def write_config(runcfg_path, config):
-    current = dict(filter(lambda i: i[0] != '_original_hash', config.items()))
-    current_text = json.dumps(current, sort_keys=True)
-    if calc_hash(current_text) == config['_original_hash']:
-        return
-    lock = lockfile.LockFile(runcfg_path.with_suffix(f'{runcfg_path.suffix}.lock'))
-    with lock:
-        fresh_config = read_config(runcfg_path)
-        # TODO just lock between the read and write and remove this failure scenario
-        if config['_original_hash'] != fresh_config['_original_hash']:
-            raise Exception('concurrent config modification')
-        runcfg_path.write_text(current_text)
-
-Gateway = namedtuple('Gateway', ['af', 'iface', 'protocol', 'addr', 'ts'])
-
-def load_defaults(run_path):
-    defaults = set()
-    for entry in run_path.iterdir():
-        if not entry.suffix == '.gateway':
-            continue
-        pretty_af, iface, protocol, _ = entry.name.split('.')
-        af = parse_af(pretty_af)
-        addr = ipaddress.ip_address(entry.read_text().strip())
-        defaults.add(Gateway(af, iface, protocol, addr, entry.lstat().st_mtime))
-    return defaults
-
-def get_default_path(run_path, af, iface, protocol):
-    pretty_af = to_pretty_af(af)
-    return run_path.joinpath(f'{pretty_af}.{iface}.{protocol}.gateway')
-
-# per address family, sorted by
-# iface priority
-# - protocol priority
-
-def parse_af(af):
-    if af == 'ip':
-        return socket.AF_INET
-    elif af == 'ip6':
-        return socket.AF_INET6
-    raise Exception(f'unknown af: {af}')
-
-def to_pretty_af(af):
-    if af == socket.AF_INET:
-        return 'ip'
-    elif af == socket.AF_INET6:
-        return 'ip6'
-    raise Exception(f'unknown af: {af}')
+    if protocol not in protocols:
+        raise Exception(f'unknown protocol: {protocol}')
 
 def default_sort_strategy(e):
     return e.ts
 
-class GatewaySelect(namedtuple('GatewaySelect', ['af', 'iface', 'protocol'])):
+class Gateway(namedtuple('Gateway', ['af', 'iface', 'protocol', 'addr', 'ts'])):
+
+    @staticmethod
+    def from_data(data):
+        kwargs = dict(data)
+        kwargs['addr'] = ipaddress.ip_address(data['addr'])
+        return Gateway(**kwargs)
+
+    def to_data(self):
+        data = self._asdict()
+        data['addr'] = str(self.addr)
+        return data
+
+class GatewaySelect(namedtuple('GatewaySelect', ['af', 'iface', 'protocol'],
+            defaults=[None, None, None])):
 
     def matches(self, o):
         if self.af is not None:
@@ -107,60 +63,96 @@ class GatewaySelect(namedtuple('GatewaySelect', ['af', 'iface', 'protocol'])):
     def from_data(data):
         return GatewaySelect(**data)
 
-# af[ip,ip6] -> iface[] -> protocol[] -> addr[]
+class Config(namedtuple('Config', ['state_path', 'priority', 'pid_path'],
+            defaults=[default_state_path, [], default_pid_path])):
+    
+    @staticmethod
+    def from_data(data):
+        kwargs = dict(data)
+        kwargs['priority'] = [ GatewaySelect.from_data(e) for e in data.get('priority', []) ]
+        return Config(**kwargs)
+
+    @staticmethod
+    def from_path(path):
+        if path.exists():
+            return Config.from_data(yaml.load(path.read_text(), Loader=yaml.SafeLoader))
+        return Config()
+
+class State(namedtuple('State', ['gateways', 'disabled'],
+            defaults=[set(), set()])):
+
+    def add(self, af, iface, protocol, addr):
+        # remove any other gateways that look like me
+        self.remove(GatewaySelect(af, iface, protocol))
+        self.gateways.update({Gateway(af, iface, protocol, addr, time.time())})
+
+    def remove(self, select):
+        matches = set(filter(select.matches, self.gateways))
+        self.gateways.difference_update(matches)
+
+    def disable(self, select):
+        self.disabled.update({select})
+
+    def enable(self, select):
+        matches = set(filter(select.matches, self.disabled))
+        self.disabled.difference_update(matches)
+
+    def deepcopy(self):
+        return State.from_data(json.loads(json.dumps(self.to_data())))
+
+    @staticmethod
+    def from_data(data):
+        kwargs = dict(data)
+        kwargs['gateways'] = { Gateway.from_data(e) for e in data.get('gateways', []) }
+        kwargs['disabled'] = { GatewaySelect.from_data(e) for e in data.get('disabled', []) }
+        return State(**kwargs)
+
+    def to_data(self):
+        data = self._asdict()
+        data['gateways'] = [ e.to_data() for e in self.gateways ]
+        data['disabled'] = [ e.to_data() for e in self.disabled ]
+        return data
+
+    @staticmethod
+    def from_path(path):
+        if path.exists():
+            return State.from_data(json.loads(path.read_text()))
+        return State()
+
+    def to_path(self, path):
+        path.write_text(json.dumps(self.to_data()))
+
+    @staticmethod
+    @contextlib.contextmanager
+    def update(config):
+        state_path = config.state_path
+        state_lock_path = Path(f'{state_path}.lock')
+        with filelock.FileLock(state_lock_path):
+            state = State.from_path(state_path)
+            pre = json.dumps(state.to_data(), sort_keys=True)
+            yield state
+            post = json.dumps(state.to_data(), sort_keys=True)
+            if pre != post:
+                state.to_path(state_path)
+                daemon.try_signal_daemon(config)
+
 class DefaultConf:
 
     def __init__(self, config):
         self.config = config
-        self.run_path = default_run_path
         self.sort_strategy = default_sort_strategy
+        self.reload_state()
 
-    def add_default(self, af, iface, protocol, addr):
-        entry = get_default_path(self.run_path, af, iface, protocol)
-        entry.write_text(str(addr))
+    def reload_state(self):
+        self.state = State.from_path(self.config.state_path)
 
-    def remove_default(self, af, iface, protocol, addr):
-        entry = get_default_path(self.run_path, af, iface, protocol)
-        entry.unlink()
-
-    def get_default_iface(self):
-        return self.config.get('default-iface', None)
-
-    def set_default_iface(self, iface):
-        if iface is None:
-            if 'default-iface' in self.config:
-                del self.config['default-iface']
-        else:
-            self.config['default-iface'] = iface
-
-    def enable(self, af, iface, protocol):
-        disabled = self.get_disabled()
-        disabled -= { GatewaySelect(af, iface, protocol) }
-        self.set_disabled(disabled)
-
-    def disable(self, af, iface, protocol):
-        disabled = self.get_disabled()
-        disabled |= { GatewaySelect(af, iface, protocol) }
-        self.set_disabled(disabled)
-
-    def get_disabled(self):
-        disabled = self.config.get('disabled', [])
-        disabled = { GatewaySelect.from_data(e) for e in disabled }
-        return disabled
-
-    def set_disabled(self, disabled):
-        self.config['disabled'] = [ e.to_data() for e in disabled ]
-
-    def get_default(self, af, iface, protocol):
-        defaults = load_defaults(self.run_path)
-
-        if iface is None:
-            iface = self.get_default_iface()
-        select = GatewaySelect(af, iface, protocol)
-        defaults = filter(select.matches, defaults)
+    def get_defaults(self, select):
+        # save state instance incase we reload
+        state = self.state
+        defaults = filter(select.matches, state.gateways)
 
         def enabled_filter(e):
-            for disabled in self.get_disabled():
+            for disabled in state.disabled:
                 if disabled.matches(e):
                     return False
             return True
@@ -168,27 +160,46 @@ class DefaultConf:
         
         # run the defaults through the priority list
         # one at a time until a bucket matches
+        # 1) for every priority, find ifaces that match it
+        by_priority = [ [] for i in range(len(self.config.priority)+1) ]
+        for default in defaults:
+            match_found = False
+            for i in range(len(self.config.priority)):
+                if self.config.priority[i].matches(default):
+                    by_priority[i].append(default)
+                    match_found = True
+                    break
+            if not match_found:
+                by_priority[-1].append(default)
+        # 2) for all priority buckets, sort them and append the output
+        defaults = []
+        for bucket in by_priority:
+            defaults.extend(list(sorted(bucket, key=self.sort_strategy, reverse=True)))
 
-        sorted_defaults = sorted(defaults, key=self.sort_strategy, reverse=True) 
-        return next(iter(sorted_defaults), None)
+        return defaults
+
+def parse_af(af):
+    if af == 'ip':
+        return int(socket.AF_INET)
+    elif af == 'ip6':
+        return int(socket.AF_INET6)
+    raise Exception(f'unknown af: {af}')
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('-c', metavar='config-path', type=Path, default=default_config_path)
     subparsers = parser.add_subparsers(dest='action')
     subparser = subparsers.add_parser('add')
-    subparser.add_argument('-f', metavar='address-family')
+    subparser.add_argument('-f', metavar='address-family', required=True)
     subparser.add_argument('-i', metavar='iface', required=True)
     subparser.add_argument('-p', metavar='protocol', required=True)
     subparser.add_argument('addr', metavar='address')
     subparser = subparsers.add_parser('remove')
     subparser.add_argument('-f', metavar='address-family')
-    subparser.add_argument('-i', metavar='iface', required=True)
-    subparser.add_argument('-p', metavar='protocol', required=True)
-    subparser = subparsers.add_parser('set-default-iface')
-    subparser.add_argument('iface', metavar='iface')
-    subparser = subparsers.add_parser('get-default-iface')
-    subparser = subparsers.add_parser('get')
-    subparser.add_argument('-f', metavar='address-family', required=True)
+    subparser.add_argument('-i', metavar='iface')
+    subparser.add_argument('-p', metavar='protocol')
+    subparser = subparsers.add_parser('get-default')
+    subparser.add_argument('-f', metavar='address-family')
     subparser.add_argument('-i', metavar='iface')
     subparser.add_argument('-p', metavar='protocol')
     subparser = subparsers.add_parser('disable')
@@ -199,46 +210,43 @@ def main():
     subparser.add_argument('-f', metavar='address-family')
     subparser.add_argument('-i', metavar='iface')
     subparser.add_argument('-p', metavar='protocol')
+    subparser = subparsers.add_parser('daemon')
+    subparser = subparsers.add_parser('signal-daemon')
     args = parser.parse_args()
 
-    run_path = default_run_path
-    runcfg_path = default_runcfg_path
-
-    run_path.mkdir(parents=True, exist_ok=True)
-
-    config = read_config(runcfg_path)
-    default_conf = DefaultConf(config)
+    config = Config.from_path(args.c)
 
     if args.action is None:
         raise Exception('action not specified')
+    elif args.action == 'daemon':
+        daemon.daemon(config)
+    elif args.action == 'signal-daemon':
+        daemon.try_signal_daemon(config, ignore_failure=False)
     elif args.action == 'add':
         validate_protocol(args.p)
         af = parse_af(args.f)    
         addr = ipaddress.ip_address(args.addr)
-        default_conf.add_default(af, args.i, args.p, addr)
+        with State.update(config) as state:
+            state.add(af, args.i, args.p, addr)
     elif args.action == 'remove':
         af = parse_af(args.f)
-        default_conf.remove_default(af, args.i, args.p)
-    elif args.action == 'get':
-        af = parse_af(args.f)
-        default = default_conf.get_default(af, args.i, args.p)
+        with State.update(config) as state:
+            state.remove(GatewaySelect(af, args.i, args.p))
+    elif args.action == 'get-default':
+        af = None if args.f is None else parse_af(args.f)
+        default_conf = DefaultConf(config)
+        select = GatewaySelect(af, args.i, args.p)
+        default = next(iter(default_conf.get_defaults(select)), None)
         if default is not None:
-            print(default.addr)
-    elif args.action == 'set-default-iface':
-        iface = None if args.iface == 'delete' else args.iface
-        default_conf.set_default_iface(iface)
-    elif args.action == 'get-default-iface':
-        iface = default_conf.get_default_iface()
-        if iface is not None:
-            print(iface)
+            print(json.dumps(default.to_data()))
     elif args.action == 'enable':
         af = None if args.f is None else parse_af(args.f)
-        default_conf.enable(af, args.i, args.p)
+        with State.update(config) as state:
+            state.enable(GatewaySelect(af, args.i, args.p))
     elif args.action == 'disable':
         af = None if args.f is None else parse_af(args.f)
-        default_conf.disable(af, args.i, args.p)
+        with State.update(config) as state:
+            state.disable(GatewaySelect(af, args.i, args.p))
     else:
         raise Exception(f'unknown action: {args.action}')
-
-    write_config(runcfg_path, config)
 
