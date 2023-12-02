@@ -9,6 +9,7 @@ import socket
 import ipaddress
 
 from . import bsdnetlink
+from .common import *
 
 class Trigger:
 
@@ -24,15 +25,6 @@ class Trigger:
 
     def acquire(self, blocking=True, timeout=None):
         return self.s.acquire(blocking=blocking, timeout=timeout)
-
-def try_signal_daemon(config, *, ignore_failure=None):
-    ignore_failure = True if ignore_failure is None else ignore_failure
-    try:
-        pid = int(config.pid_path.read_text())
-        os.kill(pid, signal.SIGUSR1)
-    except:
-        if not ignore_failure:
-            raise
 
 def daemon(config):
     config.pid_path.write_text(str(os.getpid()))
