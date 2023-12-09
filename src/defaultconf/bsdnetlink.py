@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from hashlib import sha256
+import ctypes
 import logging
 import os
 from pathlib import *
@@ -8,114 +10,89 @@ import signal
 import queue
 import threading
 import ipaddress
+from ipaddress import *
 from collections import namedtuple
 import socket
 import json
+import argparse
 
 from .bsdnet import *
 
+def digest(b):
+    return sha256(b).hexdigest()
+
 def parse_addr(addr):
     if addr.sa_family == socket.AF_INET:
-        addr_in = sockaddr_in.from_address(addressof(addr))
+        addr_in = sockaddr_in.from_sockaddr(addr)
         return ipaddress.ip_address(bytes(addr_in.sin_addr))
     elif addr.sa_family == socket.AF_INET6:
-        addr6_in = sockaddr_in6.from_address(addressof(addr))
+        addr6_in = sockaddr_in6.from_sockaddr(addr)
         return ipaddress.ip_address(bytes(addr6_in.sin6_addr))
     else:
         raise Exception(f'unsupported sa_family: {addr.sa_family}')
-    
+   
 def dump_links():
-    snl = SNL(NETLINK_ROUTE)
+    snl = SNL(NETLINK_ROUTE, read_timeout=1)
+    nw = snl.new_writer()
+    hdr = nw.create_msg_request(RTM_GETLINK)
+    hdr.nlmsg_flags |= NLM_F_DUMP
+    nw.finalize_msg()
 
-    class _msg(Structure):
-        _fields_ = [
-            ('hdr', nlmsghdr),
-            ('ifmsg', ifinfomsg)
-        ]
-    msg = _msg()
-    msg.hdr.nlmsg_type = RTM_GETLINK
-    msg.hdr.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST
-    msg.hdr.nlmsg_seq = snl.get_seq()
-    msg.hdr.nlmsg_len = sizeof(msg)
-
-    snl.send_message(msg.hdr)
-    while _hdr := snl.read_reply_multi(msg.hdr.nlmsg_seq):
-        yield parse_nlmsg_link(snl, _hdr)
-        snl.clear_lb()
+    snl.send_message(hdr)
+    while hdr := snl.read_reply_multi(hdr.nlmsg_seq):
+        yield parse_nlmsg_link(snl, hdr)
 
 def dump_addrs():
-    snl = SNL(NETLINK_ROUTE)
+    snl = SNL(NETLINK_ROUTE, read_timeout=1)
+    nw = snl.new_writer()
+    hdr = nw.create_msg_request(RTM_GETADDR)
+    hdr.nlmsg_flags |= NLM_F_DUMP
+    nw.finalize_msg()
 
-    class _msg(Structure):
-        _fields_ = [
-            ('hdr', nlmsghdr),
-            ('ifaddrmsg', ifaddrmsg)
-        ]
-    msg = _msg()
-    msg.hdr.nlmsg_type = RTM_GETADDR
-    msg.hdr.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST
-    msg.hdr.nlmsg_seq = snl.get_seq()
-    msg.hdr.nlmsg_len = sizeof(msg)
-
-    snl.send_message(msg.hdr)
-    while _hdr := snl.read_reply_multi(msg.hdr.nlmsg_seq):
-        yield parse_nlmsg_addr(snl, _hdr)
-        snl.clear_lb()
+    snl.send_message(hdr)
+    while hdr := snl.read_reply_multi(hdr.nlmsg_seq):
+        yield parse_nlmsg_addr(snl, hdr)
 
 def dump_routes():
-    snl = SNL(NETLINK_ROUTE)
+    snl = SNL(NETLINK_ROUTE, read_timeout=1)
+    nw = snl.new_writer()
+    hdr = nw.create_msg_request(RTM_GETROUTE)
+    hdr.nlmsg_flags |= NLM_F_DUMP
+# TODO fib
+# nw.reserve_msg_object(rtmsg)
+# nw.reserve_msg_object(nlattr)
+# nw.reserve_msg_object(c_uint32)
+    nw.finalize_msg()
 
-    class _msg(Structure):
-        _fields_ = [
-            ('hdr', nlmsghdr),
-            ('rtmsg', rtmsg),
-            ('nla_fibnum', nlattr),
-            ('fibnum', c_uint32)
-        ]
+    snl.send_message(hdr)
+    while hdr := snl.read_reply_multi(hdr.nlmsg_seq):
+        yield parse_nlmsg_route(snl, hdr)
 
-    msg = _msg()
-    msg.hdr.nlmsg_type = RTM_GETROUTE
-    msg.hdr.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST
-    msg.hdr.nlmsg_seq = snl.get_seq()
-    msg.nla_fibnum.nla_len = sizeof(nlattr)+sizeof(c_uint32)
-    msg.nla_fibnum.nla_type = RTA_TABLE
-    msg.fibnum = 0
-    msg.hdr.nlmsg_len = sizeof(msg)
+def parse_nlmsg_link(snl, hdr):
+    return snl.parse_nlmsg(hdr, snl_rtm_link_parser_simple)
 
-    snl.send_message(msg.hdr)
-    while _hdr := snl.read_reply_multi(msg.hdr.nlmsg_seq):
-        yield parse_nlmsg_route(snl, _hdr)
-        snl.clear_lb()
+def parse_nlmsg_addr(snl, hdr):
+    return snl.parse_nlmsg(hdr, snl_rtm_addr_parser)
 
-def parse_nlmsg_link(snl, _hdr):
-    link = snl_parsed_link_simple()
-    snl.parse_nlmsg(_hdr, snl_rtm_link_parser_simple, link)
-    return link.deepcopy()
+def parse_nlmsg_route(snl, hdr):
+    return snl.parse_nlmsg(hdr, snl_rtm_route_parser)
 
-def parse_nlmsg_addr(snl, _hdr):
-    addr = snl_parsed_addr()
-    snl.parse_nlmsg(_hdr, snl_rtm_addr_parser, addr)
-    return addr.deepcopy()
-
-def parse_nlmsg_route(snl, _hdr):
-    route = snl_parsed_route()
-    snl.parse_nlmsg(_hdr, snl_rtm_route_parser, route)
-    return route.deepcopy()
-
-def parse_nlmsg(snl, nlmsg_type, _hdr):
-    if nlmsg_type in (RTM_NEWLINK, RTM_DELLINK):
-        nlmsg = parse_nlmsg_link(snl, _hdr)
-    elif nlmsg_type in (RTM_NEWADDR, RTM_DELADDR):
-        nlmsg = parse_nlmsg_addr(snl, _hdr)
-    elif nlmsg_type in (RTM_NEWROUTE, RTM_DELROUTE):
-        nlmsg = parse_nlmsg_route(snl, _hdr)
+def parse_nlmsg(snl, hdr):
+    if hdr.nlmsg_type in (RTM_NEWLINK, RTM_DELLINK):
+        nlmsg = parse_nlmsg_link(snl, hdr)
+    elif hdr.nlmsg_type in (RTM_NEWADDR, RTM_DELADDR):
+        nlmsg = parse_nlmsg_addr(snl, hdr)
+    elif hdr.nlmsg_type in (RTM_NEWROUTE, RTM_DELROUTE):
+        nlmsg = parse_nlmsg_route(snl, hdr)
     else:
-        raise Exception(f'unsupported nlmsg_type: {nlmsg_type}')
+        raise Exception(f'unsupported nlmsg_type: {hdr.nlmsg_type}')
     return nlmsg
 
 def monitor_nl(ev, handler):
     snl_event = SNL(NETLINK_ROUTE, read_timeout=1)
-    snl_helper = SNL(NETLINK_ROUTE)
+# TODO is a helper necessary?
+#    snl_helper = SNL(NETLINK_ROUTE, read_timeout=1)
+    snl_helper = snl_event
 
     groups = [
         RTNLGRP_LINK,
@@ -130,17 +107,13 @@ def monitor_nl(ev, handler):
         snl_event.get_socket().setsockopt(SOL_NETLINK, NETLINK_ADD_MEMBERSHIP, group)
 
     while not ev.is_set():
-        _hdr = None
         try:
-            _hdr = snl_event.read_message()
+            hdr = snl_event.read_message()
         except BlockingIOError:
-            pass
-        if _hdr: # is not None:
-            hdr = nlmsghdr.from_address(_hdr.value)
-            nlmsg = parse_nlmsg(snl_helper, hdr.nlmsg_type, _hdr)
+            continue
+        if hdr:
+            nlmsg = parse_nlmsg(snl_helper, hdr)
             handler(hdr.nlmsg_type, nlmsg)
-            snl_helper.clear_lb()
-            snl_event.clear_lb()
 
 class Link(namedtuple('Link', ['name', 'index', 'up'])):
 
@@ -157,7 +130,6 @@ class LinkAddress(namedtuple('LinkAddress', ['link_index', 'local', 'address', '
         local = parse_addr(s.ifa_local.contents) if s.ifa_local else None
         addr = parse_addr(s.ifa_address.contents)
         ifaceaddr = ipaddress.ip_interface((addr, s.ifa_prefixlen,))
-        print(LinkAddress(s.ifa_index, local, ifaceaddr, s.ifa_prefixlen))
         return LinkAddress(s.ifa_index, local, ifaceaddr, s.ifa_prefixlen)
 
 class Route(namedtuple('Route', ['dst', 'gw', 'prefixlen', 'link_index', 'host'])):
@@ -242,6 +214,96 @@ class JSONEncoder(json.JSONEncoder):
             return list(o)
         return json.JSONEncoder.default(self, o)
 
+def addr_to_af(addr):
+    if type(addr) is IPv4Address:
+        return socket.AF_INET
+    elif type(addr) is IPv6Address:
+        return socket.AF_INET6
+    elif type(addr) is IPv4Network:
+        return socket.AF_INET
+    elif type(addr) is IPv6Network:
+        return socket.AF_INET6
+    else:
+        raise Exception(f'unknown address type: {type(dst)}')
+
+def do_route(snl, cmd, flags, dst, gw, def_gw, if_idx):
+    nw = snl.new_writer()
+    n = nw.create_msg_request(cmd)
+    r = nw.reserve_msg_object(rtmsg)
+    nl_request = namedtuple('nl_request', ['n', 'r'])(n, r)
+    nl_request.n.nlmsg_flags |= flags # | NLM_F_ACK
+    nl_request.r.rtm_family = addr_to_af(dst)
+    nl_request.r.rtm_table = RT_TABLE_MAIN
+    nl_request.r.rtm_scope = RT_SCOPE_NOWHERE
+
+    if cmd != RTM_DELROUTE:
+        nl_request.r.rtm_protocol = RTPROT_BOOT
+        nl_request.r.rtm_type = RTN_UNICAST
+
+    nl_request.r.rtm_family = addr_to_af(dst)
+    nl_request.r.rtm_dst_len = dst.prefixlen
+
+    if nl_request.r.rtm_family == socket.AF_INET6:
+        nl_request.r.rtm_scope = RT_SCOPE_UNIVERSE
+    else:
+        nl_request.r.rtm_scope = RT_SCOPE_LINK
+
+    if gw:
+        gw_data = (c_char*len(gw.packed)).from_buffer_copy(gw.packed)
+        nw.add_msg_attr(RTA_GATEWAY, sizeof(gw_data), gw_data)
+        nl_request.r.rtm_scope = 0
+        nl_request.r.rtm_family = addr_to_af(gw)
+
+    if not def_gw:
+        dst_packed = dst.network_address.packed
+        dst_data = (c_char*len(dst_packed)).from_buffer_copy(dst_packed)
+        nw.add_msg_attr(RTA_DST, sizeof(dst_data), dst_data) 
+# NOTE this is optional
+        if if_idx:
+            nw.add_msg_attr(RTA_OIF, sizeof(c_int), c_int(if_idx))
+
+    nw.finalize_msg()
+    snl.send_message(nl_request.n)
+    snl.read_reply_code(nl_request.n.nlmsg_seq)
+
+def if_nametoindex_nl(ifname):
+    snl = SNL(NETLINK_ROUTE, read_timeout=1)
+
+    nw = snl.new_writer()
+    hdr = nw.create_msg_request(RTM_GETLINK)
+    nw.reserve_msg_object(ifinfomsg)
+    data = create_string_buffer(ifname.encode())
+    nw.add_msg_attr(IFLA_IFNAME, sizeof(data), data)
+    nw.finalize_msg()
+
+    snl.send_message(hdr)
+    hdr = snl.read_reply_multi(hdr.nlmsg_seq)
+    return snl.parse_nlmsg(hdr, snl_rtm_link_parser_simple).ifi_index
+
+def new_route(dst, gw, iface):
+    nl_cmd = RTM_NEWROUTE
+    nl_flags = NLM_F_CREATE | NLM_F_EXCL
+
+    snl = SNL(NETLINK_ROUTE, read_timeout=1)
+    to_addr = ipaddress.ip_network(dst) #'8.8.4.4')
+    gw_addr = ipaddress.ip_address(gw) #'192.168.12.1')    
+    default_gw = None
+    if_idx = None if iface is None else if_nametoindex_nl(iface) #'lo0')
+
+    do_route(snl, nl_cmd, nl_flags, to_addr, gw_addr, default_gw, if_idx)
+
+def delete_route(dst, gw, iface):
+    nl_cmd = RTM_DELROUTE
+    nl_flags = 0
+
+    snl = SNL(NETLINK_ROUTE, read_timeout=1)
+    to_addr = ipaddress.ip_network(dst) #'8.8.4.4')
+    gw_addr = ipaddress.ip_address(gw) #'192.168.12.1')    
+    default_gw = None
+    if_idx = None if iface is None else if_nametoindex_nl(iface)
+
+    do_route(snl, nl_cmd, nl_flags, to_addr, gw_addr, default_gw, if_idx)
+
 def maintain_nettables(finish, trigger_ev, nettables):
     executor = concurrent.futures.ThreadPoolExecutor()
     tasks = []
@@ -264,7 +326,7 @@ def maintain_nettables(finish, trigger_ev, nettables):
     def nlmsg_handler():
         while not finish.is_set():
             try:
-                nlmsg_type, nlmsg = nlmsg_q.get(timeout=1)
+                nlmsg_type, nlmsg = nlmsg_q.get(read_timeout=1)
             except queue.Empty:
                 continue
             if nlmsg_type == RTM_NEWLINK:
@@ -290,4 +352,51 @@ def maintain_nettables(finish, trigger_ev, nettables):
             task.result()
     finally:
         finish.set()
+
+def main():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest='action')
+    subparser = subparsers.add_parser('new-route')
+    subparser.add_argument('-d', metavar='destination')
+    subparser.add_argument('-g', metavar='gateway')
+    subparser.add_argument('-i', metavar='iface')
+    subparser = subparsers.add_parser('delete-route')
+    subparser.add_argument('-d', metavar='destination')
+    subparser.add_argument('-g', metavar='gateway')
+    subparser.add_argument('-i', metavar='iface')
+    subparsers.add_parser('dump-links')
+    subparsers.add_parser('dump-addrs')
+    subparsers.add_parser('dump-routes')
+    subparsers.add_parser('monitor-nl')
+    subparser = subparsers.add_parser('if_nametoindex_nl')
+    subparser.add_argument('link')
+    args = parser.parse_args()
+
+    if args.action is None:
+        raise Exception('action not specified')
+    elif args.action == 'new-route':
+        new_route(args.d, args.g, args.i)
+    elif args.action == 'delete-route':
+        delete_route(args.d, args.g, args.i)
+    elif args.action == 'dump-links':
+        for link in dump_links():
+            l = Link.from_snl_parsed_link_simple(link)
+            print(l)
+    elif args.action == 'dump-addrs':
+        for addr in dump_addrs():
+            a = LinkAddress.from_snl_parsed_addr(addr)
+            print(a)
+    elif args.action == 'dump-routes':
+        for route in dump_routes():
+            r = Route.from_snl_parsed_route(route)
+            print(r)
+    elif args.action == 'monitor-nl':
+        ev = threading.Event()
+        def handler(nlmsg_type, nlmsg):
+            print(nlmsg)
+        monitor_nl(ev, handler)
+    elif args.action == 'if_nametoindex_nl':
+        print(if_nametoindex_nl(args.link))
+    else:
+        raise Exception(f'unknown action: {args.action}')
 

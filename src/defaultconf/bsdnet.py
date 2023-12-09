@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+import os
+import functools
+import time
+from collections import namedtuple
 import socket
 from ctypes import *
 
@@ -182,6 +186,32 @@ class snl_parsed_addr(Structure):
         self.ifa_cacheinfo = c_void_p() # TODO
         return copy
 
+# netlink/route/route.h
+class rtattr(Structure):
+
+    _fields_ = [
+        ('rta_len', c_short),
+        ('rta_type', c_ushort)
+    ]
+
+# netlink/netlink_snl.h
+class snl_writer(Structure):
+
+    _fields_ = [
+        ('base', POINTER(c_char)),
+        ('offset', c_uint32),
+        ('size', c_uint32),
+        ('hdr', POINTER(nlmsghdr)),
+        ('ss', POINTER(snl_state)),
+        ('error', c_bool)
+    ]
+
+# NOTE everything is copied coming out of here, it's a perf hit but makes things predictable
+# NOTE what is NOT performed though is the modification of memory addresses in the copies,
+#   see examples of deepcopy for how this can be handled
+# NOTE one of the goals of SNL is to remove error ambiguity and allow callers to simply call
+#   this is handled in part by the c code, which aggresively checks for errno and throws,
+#   and is also handled by asserts here, as well as validation of the error struct when present
 class SNL:
 
     def __init__(self, netlink_family, *, read_timeout=None):
@@ -190,41 +220,151 @@ class SNL:
         self.ss_s = socket.fromfd(self.ss.fd, AF_NETLINK, socket.SOCK_RAW)
         # not using python settimeout because it works very differently
         # (puts socket into non-blocking and uses select, which means the timeout is near 0)
-        if read_timeout is not None:
-            timeout = timeval(tv_sec=read_timeout, tv_usec=0)
-            self.ss_s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, timeout)
+        c_read_timeout = timeval(tv_sec=1, tv_usec=0)
+        self.ss_s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, c_read_timeout)
+        self.read_timeout = read_timeout
+        # reference count to clear lb
+        self.lbc = 0
 
     def get_socket(self):
         return self.ss_s
-
-    def clear_lb(self):
-        snl_clear_lb(addressof(self.ss))
 
     def get_seq(self):
         return snl_get_seq(addressof(self.ss))
 
     def send_message(self, hdr):
-        snl_send_message(addressof(self.ss), addressof(hdr))
+        rc = snl_send_message(addressof(self.ss), addressof(hdr))
+        assert rc
 
-    def read_message(self):
-        _hdr = c_void_p(snl_read_message(addressof(self.ss)))
-        return _hdr if _hdr else None
+    def _read_with_timeout(self, read_op, timeout):
+        timeout = self.read_timeout if timeout is None else timeout
+        endtime = None if timeout is None else time.time() + timeout
+        while True:
+            try:
+                return read_op()
+            except BlockingIOError:
+                if endtime is None:
+                    continue
+                if time.time() >= endtime:
+                    raise
 
-    def read_reply_multi(self, nlmsg_seq):
+    # TODO cleaner way?
+    @staticmethod
+    def _copy_hdr(_hdr):
+        hdr = nlmsghdr.from_address(_hdr)
+        buf = (c_char*hdr.nlmsg_len)()
+        memmove(buf, _hdr, hdr.nlmsg_len)
+        return nlmsghdr.from_buffer(buf)
+
+    def read_message(self, *, timeout=None):
+        read_op = functools.partial(snl_read_message, addressof(self.ss))
+        _hdr = self._read_with_timeout(read_op, timeout)
+        assert _hdr
+        return SNL._copy_hdr(_hdr)
+
+    def read_reply(self, nlmsg_seq, *, timeout=None):
+        read_op = functools.partial(snl_read_reply, addressof(self.ss), nlmsg_seq)
+        _hdr = self._read_with_timeout(read_op, timeout)
+        assert _hdr
+        return SNL._copy_hdr(_hdr)
+
+    @staticmethod
+    def _handle_error(e):
+        if e.error_str:
+            error_msg = string_at(e.error_str)
+        else:
+            error_msg = os.strerror(e.error)
+        raise OSError(e.error, error_msg)
+
+    def read_reply_multi(self, nlmsg_seq, *, timeout=None):
         e = snl_errmsg_data()
-        _hdr = c_void_p(snl_read_reply_multi(addressof(self.ss), nlmsg_seq, addressof(e)))
-        if e.error != 0:
-            if e.error_str:
-                error_msg = string_at(e.error_str)
-                raise Exception(f'error[{e.error}]: {error_msg}')
-            else:
-                raise Exception(f'error[{e.error}]')
-        return _hdr if _hdr else None
+        read_op = functools.partial(snl_read_reply_multi, addressof(self.ss), nlmsg_seq, addressof(e))
+        _hdr = self._read_with_timeout(read_op, timeout)
+        if e.error:
+            SNL._handle_error(e)
+        return SNL._copy_hdr(_hdr) if _hdr else None
 
-    def parse_nlmsg(self, hdr, parser, target):
-        if not snl_parse_nlmsg(addressof(self.ss), hdr.value, parser, addressof(target)):
-            raise Exception()
+    def read_reply_code(self, nlmsg_seq, *, timeout=None):
+        e = snl_errmsg_data()
+        read_op = functools.partial(snl_read_reply_code, addressof(self.ss), nlmsg_seq, addressof(e))
+        rc = self._read_with_timeout(read_op, timeout)
+        if e.error:
+            SNL._handle_error(e)
+        assert rc
+
+    def parse_nlmsg(self, hdr, parser):
+        target = parser.t()
+        self._inc_lbc()
+        try:
+            if not snl_parse_nlmsg(addressof(self.ss), addressof(hdr), parser.c_fn_p, addressof(target)):
+                raise Exception()
+            # deepcopy the known result to normalize the memory addresses (in reality python refs)
+            copy = target.deepcopy()
+        finally:
+            self._dec_lbc()
+        return copy
+
+    def new_writer(self):
+        return SNLWriter(self)
+
+    def _inc_lbc(self):
+        self.lbc += 1
+
+    def _dec_lbc(self):
+        self.lbc -= 1
+        if self.lbc == 0:
+            snl_clear_lb(addressof(self.ss))
 
     def __del__(self):
         snl_free(addressof(self.ss))
+
+# we basically expect the c layer to throw OSError for anything wrong
+# but we assert here for sanity checks
+# NOTE the objects returned from this are bound to the linear buffer
+#   if you lose a reference to the writer while still using the
+#   returns, then shit could get fucked
+class SNLWriter:
+
+    def __init__(self, snl):
+        snl._inc_lbc()
+        self.snl = snl
+        self.nw = snl_writer()
+        snl_init_writer(addressof(snl.ss), addressof(self.nw))
+        assert not self.nw.error
+
+    def reserve_msg_data_raw(self, sz):
+        p = c_void_p(snl_reserve_msg_data_raw(addressof(self.nw), sz))
+        assert not self.nw.error
+        assert p
+        return p
+       
+    def reserve_msg_object(self, t):
+        p = self.reserve_msg_data_raw(sizeof(t))
+        return t.from_address(p.value)
+
+    def add_msg_attr(self, attr_type, attr_len, data):
+        rc = snl_add_msg_attr(addressof(self.nw), attr_type, attr_len, addressof(data))
+        assert not self.nw.error
+        assert rc
+
+    def create_msg_request(self, nlmsg_type):
+        _hdr = snl_create_msg_request(addressof(self.nw), nlmsg_type)
+        assert not self.nw.error
+        assert _hdr
+        return nlmsghdr.from_address(_hdr)
+
+    def finalize_msg(self):
+        _hdr = snl_finalize_msg(addressof(self.nw))
+        assert not self.nw.error
+        assert _hdr
+        return nlmsghdr.from_address(_hdr)
+
+    def __del__(self):
+        self.snl._dec_lbc()
+
+Parser = namedtuple('Parser', ['c_fn_p', 't'])
+
+snl_rtm_link_parser_simple = Parser(snl_rtm_link_parser_simple, snl_parsed_link_simple)
+snl_rtm_addr_parser = Parser(snl_rtm_addr_parser, snl_parsed_addr)
+snl_rtm_route_parser = Parser(snl_rtm_route_parser, snl_parsed_route)
 

@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 
 from .common import *
-from . import daemon
 
 default_protocols = {'static', 'dhcp', 'ppp', 'ra'}
 def validate_protocol(protocol):
@@ -56,6 +55,7 @@ def main():
     if args.action is None:
         raise Exception('action not specified')
     elif args.action == 'daemon':
+        from . import daemon
         daemon.daemon(config)
     elif args.action == 'signal-daemon':
         try_signal_daemon(config, ignore_failure=False)

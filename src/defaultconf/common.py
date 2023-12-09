@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import logging
 import signal
 import os
 import contextlib
@@ -182,7 +183,9 @@ def try_signal_daemon(config, *, ignore_failure=None):
     try:
         pid = int(config.pid_path.read_text())
         os.kill(pid, signal.SIGUSR1)
-    except ProcessLookupError:
-        if not ignore_failure:
+    except Exception as e:
+        if ignore_failure:
+            logging.error(e)
+        else:
             raise
 

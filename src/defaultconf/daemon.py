@@ -77,13 +77,17 @@ def daemon(config):
                 defaults = defaultconf.get_defaults(GatewaySelect(af=af))
                 found_default = None
                 for default in defaults:
+                    # filter links to link name
                     try:
                         linkaddrs, = nettables.get_links(lambda l: l.link.name == default.link)
                     except ValueError:
-                        # catch too few and too many
+                        # catch too few and too many,
+                        # TODO too many should never happen, consider throwing
                         continue
+                    # skip if link isn't up
                     if not linkaddrs.link.up:
                         continue
+                    # filter until you find an addr that works
                     for addr in linkaddrs.addrs:
                         if default.addr not in addr.address.network:
                             continue
@@ -98,6 +102,8 @@ def daemon(config):
             try:
                 current_inet4_default, = nettables.get_routes(lambda r: r.dst == inet4_default_dst)
             except ValueError:
+                # too few or too many
+                # TODO throw on too many?
                 pass
             if inet4_default is None:
                 if current_inet4_default is None:

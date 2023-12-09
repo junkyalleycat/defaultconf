@@ -9,6 +9,7 @@ in_port_t = c_uint16   # sys/types.h
 in_addr_t = c_uint32   # sys/types.h
 u_char = c_ubyte       # sys/types.h
 size_t = c_uint64      # sys/_types.h
+ssize_t = c_int64      # sys/_types.h
 unsigned = c_uint      # c-spec
 
 # sys/_timeval.h
@@ -44,8 +45,7 @@ class sockaddr(Structure):
 
     # need to copy sa_len, not sizeof(sockaddr)
     def deepcopy(self):
-        copy = create_string_buffer(self.sa_len)
-        # TODO why the pointer?  should be automatic
+        copy = (c_char*self.sa_len)()
         memmove(copy, addressof(self), self.sa_len)
         return sockaddr.from_buffer(copy)
 
@@ -66,6 +66,12 @@ class sockaddr_in(Structure):
         ('sin_addr', in_addr),
         ('sin_zero', c_char*8)
     ]
+
+    @staticmethod
+    def from_sockaddr(addr):
+        buf = (c_char*addr.sa_len)()
+        memmove(buf, addressof(addr), sizeof(sockaddr_in))
+        return sockaddr_in.from_buffer(buf)
 
 # netinet6/in6.h
 class in6_addr(Structure):
@@ -94,4 +100,10 @@ class sockaddr_in6(Structure):
         ('sin6_addr', in6_addr),
         ('sin6_scope_id', c_uint32)
     ]
+
+    @staticmethod
+    def from_sockaddr(addr):
+        buf = (c_char*addr.sa_len)()
+        memmove(buf, addressof(addr), sizeof(sockaddr_in6))
+        return sockaddr_in6.from_buffer(buf)
 
