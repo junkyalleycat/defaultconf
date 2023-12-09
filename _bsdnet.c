@@ -274,6 +274,7 @@ PyMODINIT_FUNC PyInit__bsdnet() {
     PyModule_AddIntConstant(module, "RT_TABLE_MAIN", RT_TABLE_MAIN);
     PyModule_AddIntConstant(module, "RT_SCOPE_NOWHERE", RT_SCOPE_NOWHERE);
     PyModule_AddIntConstant(module, "RTPROT_BOOT", RTPROT_BOOT);
+    PyModule_AddIntConstant(module, "RTPROT_STATIC", RTPROT_STATIC);
     PyModule_AddIntConstant(module, "RTN_UNICAST", RTN_UNICAST);
     PyModule_AddIntConstant(module, "RT_SCOPE_UNIVERSE", RT_SCOPE_UNIVERSE);
     PyModule_AddIntConstant(module, "RTA_GATEWAY", RTA_GATEWAY);
@@ -286,6 +287,8 @@ PyMODINIT_FUNC PyInit__bsdnet() {
     
     PyModule_AddIntConstant(module, "RTF_GATEWAY", RTF_GATEWAY);
     PyModule_AddIntConstant(module, "RTF_HOST", RTF_HOST);
+    PyModule_AddIntConstant(module, "RTF_STATIC", RTF_STATIC);
+    PyModule_AddIntConstant(module, "NL_RTA_RTFLAGS", NL_RTA_RTFLAGS);
     
     return module;
 }

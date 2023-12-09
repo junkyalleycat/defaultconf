@@ -223,8 +223,6 @@ class SNL:
         c_read_timeout = timeval(tv_sec=1, tv_usec=0)
         self.ss_s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, c_read_timeout)
         self.read_timeout = read_timeout
-        # reference count to clear lb
-        self.lbc = 0
 
     def get_socket(self):
         return self.ss_s
@@ -271,7 +269,7 @@ class SNL:
     @staticmethod
     def _handle_error(e):
         if e.error_str:
-            error_msg = string_at(e.error_str)
+            error_msg = string_at(e.error_str).decode()
         else:
             error_msg = os.strerror(e.error)
         raise OSError(e.error, error_msg)
@@ -294,73 +292,91 @@ class SNL:
 
     def parse_nlmsg(self, hdr, parser):
         target = parser.t()
-        self._inc_lbc()
         try:
             if not snl_parse_nlmsg(addressof(self.ss), addressof(hdr), parser.c_fn_p, addressof(target)):
                 raise Exception()
             # deepcopy the known result to normalize the memory addresses (in reality python refs)
             copy = target.deepcopy()
         finally:
-            self._dec_lbc()
+            self._clear_lb()
         return copy
 
     def new_writer(self):
         return SNLWriter(self)
 
-    def _inc_lbc(self):
-        self.lbc += 1
-
-    def _dec_lbc(self):
-        self.lbc -= 1
-        if self.lbc == 0:
-            snl_clear_lb(addressof(self.ss))
+    def _clear_lb(self):
+        snl_clear_lb(addressof(self.ss))
 
     def __del__(self):
         snl_free(addressof(self.ss))
 
-# we basically expect the c layer to throw OSError for anything wrong
-# but we assert here for sanity checks
-# NOTE the objects returned from this are bound to the linear buffer
-#   if you lose a reference to the writer while still using the
-#   returns, then shit could get fucked
+# NOTE
+#   This odd class records a series of operations on an SNLWriter, but doesn't
+#   actually execute them until we finalize.  This way we don't have to worry about
+#   bad memory references from reallocations and clear_lb.  This is still less code
+#   than porting everything to python, or writing my own snl
 class SNLWriter:
 
     def __init__(self, snl):
-        snl._inc_lbc()
         self.snl = snl
         self.nw = snl_writer()
         snl_init_writer(addressof(snl.ss), addressof(self.nw))
         assert not self.nw.error
+        self.ops = []
+        self.finalized = False
 
     def reserve_msg_data_raw(self, sz):
-        p = c_void_p(snl_reserve_msg_data_raw(addressof(self.nw), sz))
-        assert not self.nw.error
-        assert p
-        return p
+        buf = (c_char*sz)()
+        def op():
+            p = c_void_p(snl_reserve_msg_data_raw(addressof(self.nw), sz))
+            assert not self.nw.error
+            assert p
+            memmove(p, buf, sz)
+        self.ops.append(op)
+        return cast(buf, c_void_p)
        
     def reserve_msg_object(self, t):
         p = self.reserve_msg_data_raw(sizeof(t))
         return t.from_address(p.value)
 
     def add_msg_attr(self, attr_type, attr_len, data):
-        rc = snl_add_msg_attr(addressof(self.nw), attr_type, attr_len, addressof(data))
-        assert not self.nw.error
-        assert rc
+        def op():
+            rc = snl_add_msg_attr(addressof(self.nw), attr_type, attr_len, addressof(data))
+            assert not self.nw.error
+            assert rc
+        self.ops.append(op)
 
     def create_msg_request(self, nlmsg_type):
-        _hdr = snl_create_msg_request(addressof(self.nw), nlmsg_type)
-        assert not self.nw.error
-        assert _hdr
-        return nlmsghdr.from_address(_hdr)
+        hdr = nlmsghdr()
+        # TODO special cases are gross
+        hdr.nlmsg_type = nlmsg_type
+        hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK
+        def op():
+            _hdr = snl_create_msg_request(addressof(self.nw), nlmsg_type)
+            assert not self.nw.error
+            assert _hdr
+            h = nlmsghdr.from_address(_hdr)
+            # TODO certain fields are created already, this overwrites them
+            memmove(_hdr, addressof(hdr), sizeof(hdr))
+        self.ops.append(op)
+        return hdr
 
     def finalize_msg(self):
-        _hdr = snl_finalize_msg(addressof(self.nw))
-        assert not self.nw.error
-        assert _hdr
-        return nlmsghdr.from_address(_hdr)
-
-    def __del__(self):
-        self.snl._dec_lbc()
+        if self.finalized:
+            raise Exception()
+        self.finalized = True
+        try:
+            for op in self.ops:
+                op()
+            _hdr = snl_finalize_msg(addressof(self.nw))
+            assert not self.nw.error
+            assert _hdr
+            hdr = nlmsghdr.from_address(_hdr)
+            buf = (c_char*hdr.nlmsg_len)()
+            memmove(buf, addressof(hdr), hdr.nlmsg_len)
+            return nlmsghdr.from_buffer(buf)
+        finally:
+            self.snl._clear_lb()
 
 Parser = namedtuple('Parser', ['c_fn_p', 't'])
 

@@ -9,7 +9,6 @@ import concurrent.futures
 import signal
 import queue
 import threading
-import ipaddress
 from ipaddress import *
 from collections import namedtuple
 import socket
@@ -24,10 +23,10 @@ def digest(b):
 def parse_addr(addr):
     if addr.sa_family == socket.AF_INET:
         addr_in = sockaddr_in.from_sockaddr(addr)
-        return ipaddress.ip_address(bytes(addr_in.sin_addr))
+        return ip_address(bytes(addr_in.sin_addr))
     elif addr.sa_family == socket.AF_INET6:
         addr6_in = sockaddr_in6.from_sockaddr(addr)
-        return ipaddress.ip_address(bytes(addr6_in.sin6_addr))
+        return ip_address(bytes(addr6_in.sin6_addr))
     else:
         raise Exception(f'unsupported sa_family: {addr.sa_family}')
    
@@ -129,7 +128,7 @@ class LinkAddress(namedtuple('LinkAddress', ['link_index', 'local', 'address', '
     def from_snl_parsed_addr(s):
         local = parse_addr(s.ifa_local.contents) if s.ifa_local else None
         addr = parse_addr(s.ifa_address.contents)
-        ifaceaddr = ipaddress.ip_interface((addr, s.ifa_prefixlen,))
+        ifaceaddr = ip_interface((addr, s.ifa_prefixlen,))
         return LinkAddress(s.ifa_index, local, ifaceaddr, s.ifa_prefixlen)
 
 class Route(namedtuple('Route', ['dst', 'gw', 'prefixlen', 'link_index', 'host'])):
@@ -141,7 +140,7 @@ class Route(namedtuple('Route', ['dst', 'gw', 'prefixlen', 'link_index', 'host']
         host_flag = bool(s.rta_rtflags & RTF_HOST)
         dst = parse_addr(s.rta_dst.contents)
         if not host_flag:
-            dst = ipaddress.ip_network((dst, s.rtm_dst_len,))
+            dst = ip_network((dst, s.rtm_dst_len,))
         if s.rta_rtflags & RTF_GATEWAY:
             gw = parse_addr(s.rta_gw.contents)
         else:
@@ -204,9 +203,9 @@ class NetTables:
 class JSONEncoder(json.JSONEncoder):
 
     def default(self, o):
-        if type(o) is ipaddress.IPv4Address:
+        if type(o) is IPv4Address:
             return str(o)
-        elif type(o) is ipaddress.IPv6Address:
+        elif type(o) is IPv6Address:
             return str(o)
         elif type(o) is NetTables:
             return { 'links': o.links, 'routes': o.routes }
@@ -226,45 +225,39 @@ def addr_to_af(addr):
     else:
         raise Exception(f'unknown address type: {type(dst)}')
 
-def do_route(snl, cmd, flags, dst, gw, def_gw, if_idx):
+def do_route(fib, cmd, flags, dst, gw, if_idx):
+    snl = SNL(NETLINK_ROUTE, read_timeout=1)
+
     nw = snl.new_writer()
-    n = nw.create_msg_request(cmd)
-    r = nw.reserve_msg_object(rtmsg)
-    nl_request = namedtuple('nl_request', ['n', 'r'])(n, r)
-    nl_request.n.nlmsg_flags |= flags
-    nl_request.r.rtm_family = addr_to_af(dst)
-    nl_request.r.rtm_table = RT_TABLE_MAIN # fib
-    nl_request.r.rtm_scope = RT_SCOPE_NOWHERE
+    hdr = nw.create_msg_request(cmd)
+    hdr.nlmsg_flags |= flags
+    rtm = nw.reserve_msg_object(rtmsg)
+    rtm.rtm_family = addr_to_af(dst)
+    rtm.rtm_protocol = RTPROT_STATIC 
+    rtm.rtm_type = RTN_UNICAST
+    rtm.rtm_dst_len = dst.prefixlen
 
-    if cmd != RTM_DELROUTE:
-        nl_request.r.rtm_protocol = RTPROT_BOOT
-        nl_request.r.rtm_type = RTN_UNICAST
+    dst_packed = dst.network_address.packed
+    dst_data = (c_ubyte*len(dst_packed)).from_buffer_copy(dst_packed)
+    nw.add_msg_attr(RTA_DST, sizeof(dst_data), dst_data) 
+    nw.add_msg_attr(RTA_TABLE, sizeof(c_uint32), c_uint32(fib))
 
-    nl_request.r.rtm_family = addr_to_af(dst)
-    nl_request.r.rtm_dst_len = dst.prefixlen
-
-    if nl_request.r.rtm_family == socket.AF_INET6:
-        nl_request.r.rtm_scope = RT_SCOPE_UNIVERSE
-    else:
-        nl_request.r.rtm_scope = RT_SCOPE_LINK
+    # the netlink rtm.rtm_protocol seems to be ignored
+    rtm_flags = RTF_STATIC 
+    nw.add_msg_attr(NL_RTA_RTFLAGS, sizeof(c_uint32), c_uint32(rtm_flags))
 
     if gw:
-        gw_data = (c_char*len(gw.packed)).from_buffer_copy(gw.packed)
+        assert addr_to_af(dst) == addr_to_af(gw)
+        gw_data = (c_ubyte*len(gw.packed)).from_buffer_copy(gw.packed)
         nw.add_msg_attr(RTA_GATEWAY, sizeof(gw_data), gw_data)
-        nl_request.r.rtm_scope = 0
-        nl_request.r.rtm_family = addr_to_af(gw)
 
-    if not def_gw:
-        dst_packed = dst.network_address.packed
-        dst_data = (c_char*len(dst_packed)).from_buffer_copy(dst_packed)
-        nw.add_msg_attr(RTA_DST, sizeof(dst_data), dst_data) 
-# NOTE this is optional
-        if if_idx:
-            nw.add_msg_attr(RTA_OIF, sizeof(c_int), c_int(if_idx))
+    # this is optional, but i should provide to be explicit
+    if if_idx:
+        nw.add_msg_attr(RTA_OIF, sizeof(c_uint32), c_uint32(if_idx))
 
     hdr = nw.finalize_msg()
-    snl.send_message(nl_request.n)
-    snl.read_reply_code(nl_request.n.nlmsg_seq)
+    snl.send_message(hdr)
+    snl.read_reply_code(hdr.nlmsg_seq)
 
 def if_nametoindex_nl(ifname):
     snl = SNL(NETLINK_ROUTE, read_timeout=1)
@@ -278,31 +271,24 @@ def if_nametoindex_nl(ifname):
 
     snl.send_message(hdr)
     hdr = snl.read_reply_multi(hdr.nlmsg_seq)
+    snl.read_reply_multi(hdr.nlmsg_seq)
     return snl.parse_nlmsg(hdr, snl_rtm_link_parser_simple).ifi_index
 
-def new_route(dst, gw, iface):
+def new_route(fib, dst, gw, iface):
     nl_cmd = RTM_NEWROUTE
     nl_flags = NLM_F_CREATE | NLM_F_EXCL
 
-    snl = SNL(NETLINK_ROUTE, read_timeout=1)
-    to_addr = ipaddress.ip_network(dst) #'8.8.4.4')
-    gw_addr = ipaddress.ip_address(gw) #'192.168.12.1')    
-    default_gw = None
-    if_idx = None if iface is None else if_nametoindex_nl(iface) #'lo0')
+    if_idx = None if iface is None else if_nametoindex_nl(iface)
 
-    do_route(snl, nl_cmd, nl_flags, to_addr, gw_addr, default_gw, if_idx)
+    do_route(fib, nl_cmd, nl_flags, dst, gw, if_idx)
 
-def delete_route(dst, gw, iface):
+def delete_route(fib, dst, gw, iface):
     nl_cmd = RTM_DELROUTE
     nl_flags = 0
 
-    snl = SNL(NETLINK_ROUTE, read_timeout=1)
-    to_addr = ipaddress.ip_network(dst) #'8.8.4.4')
-    gw_addr = ipaddress.ip_address(gw) #'192.168.12.1')    
-    default_gw = None
     if_idx = None if iface is None else if_nametoindex_nl(iface)
 
-    do_route(snl, nl_cmd, nl_flags, to_addr, gw_addr, default_gw, if_idx)
+    do_route(fib, nl_cmd, nl_flags, dst, gw, if_idx)
 
 def maintain_nettables(finish, trigger_ev, nettables):
     executor = concurrent.futures.ThreadPoolExecutor()
@@ -357,13 +343,15 @@ def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest='action')
     subparser = subparsers.add_parser('new-route')
-    subparser.add_argument('-d', metavar='destination')
-    subparser.add_argument('-g', metavar='gateway')
+    subparser.add_argument('-d', metavar='destination', type=ip_network, required=True)
+    subparser.add_argument('-g', metavar='gateway', type=ip_address)
     subparser.add_argument('-i', metavar='iface')
+    subparser.add_argument('-f', metavar='fib', type=int, default=0)
     subparser = subparsers.add_parser('delete-route')
-    subparser.add_argument('-d', metavar='destination')
-    subparser.add_argument('-g', metavar='gateway')
+    subparser.add_argument('-d', metavar='destination', type=ip_network, required=True)
+    subparser.add_argument('-g', metavar='gateway', type=ip_address)
     subparser.add_argument('-i', metavar='iface')
+    subparser.add_argument('-f', metavar='fib', type=int, default=0)
     subparsers.add_parser('dump-links')
     subparsers.add_parser('dump-addrs')
     subparsers.add_parser('dump-routes')
@@ -375,9 +363,9 @@ def main():
     if args.action is None:
         raise Exception('action not specified')
     elif args.action == 'new-route':
-        new_route(args.d, args.g, args.i)
+        new_route(args.f, args.d, args.g, args.i)
     elif args.action == 'delete-route':
-        delete_route(args.d, args.g, args.i)
+        delete_route(args.f, args.d, args.g, args.i)
     elif args.action == 'dump-links':
         for link in dump_links():
             l = Link.from_snl_parsed_link_simple(link)
