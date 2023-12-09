@@ -36,7 +36,7 @@ def dump_links():
     nw = snl.new_writer()
     hdr = nw.create_msg_request(RTM_GETLINK)
     hdr.nlmsg_flags |= NLM_F_DUMP
-    nw.finalize_msg()
+    hdr = nw.finalize_msg()
 
     snl.send_message(hdr)
     while hdr := snl.read_reply_multi(hdr.nlmsg_seq):
@@ -47,7 +47,7 @@ def dump_addrs():
     nw = snl.new_writer()
     hdr = nw.create_msg_request(RTM_GETADDR)
     hdr.nlmsg_flags |= NLM_F_DUMP
-    nw.finalize_msg()
+    hdr = nw.finalize_msg()
 
     snl.send_message(hdr)
     while hdr := snl.read_reply_multi(hdr.nlmsg_seq):
@@ -62,7 +62,7 @@ def dump_routes():
 # nw.reserve_msg_object(rtmsg)
 # nw.reserve_msg_object(nlattr)
 # nw.reserve_msg_object(c_uint32)
-    nw.finalize_msg()
+    hdr = nw.finalize_msg()
 
     snl.send_message(hdr)
     while hdr := snl.read_reply_multi(hdr.nlmsg_seq):
@@ -231,9 +231,9 @@ def do_route(snl, cmd, flags, dst, gw, def_gw, if_idx):
     n = nw.create_msg_request(cmd)
     r = nw.reserve_msg_object(rtmsg)
     nl_request = namedtuple('nl_request', ['n', 'r'])(n, r)
-    nl_request.n.nlmsg_flags |= flags # | NLM_F_ACK
+    nl_request.n.nlmsg_flags |= flags
     nl_request.r.rtm_family = addr_to_af(dst)
-    nl_request.r.rtm_table = RT_TABLE_MAIN
+    nl_request.r.rtm_table = RT_TABLE_MAIN # fib
     nl_request.r.rtm_scope = RT_SCOPE_NOWHERE
 
     if cmd != RTM_DELROUTE:
@@ -262,7 +262,7 @@ def do_route(snl, cmd, flags, dst, gw, def_gw, if_idx):
         if if_idx:
             nw.add_msg_attr(RTA_OIF, sizeof(c_int), c_int(if_idx))
 
-    nw.finalize_msg()
+    hdr = nw.finalize_msg()
     snl.send_message(nl_request.n)
     snl.read_reply_code(nl_request.n.nlmsg_seq)
 
@@ -274,7 +274,7 @@ def if_nametoindex_nl(ifname):
     nw.reserve_msg_object(ifinfomsg)
     data = create_string_buffer(ifname.encode())
     nw.add_msg_attr(IFLA_IFNAME, sizeof(data), data)
-    nw.finalize_msg()
+    hdr = nw.finalize_msg()
 
     snl.send_message(hdr)
     hdr = snl.read_reply_multi(hdr.nlmsg_seq)
