@@ -246,22 +246,21 @@ class SNL:
                 if time.time() >= endtime:
                     raise
 
-    # TODO cleaner way?
     @staticmethod
     def _copy_hdr(_hdr):
         hdr = nlmsghdr.from_address(_hdr)
-        buf = (c_char*hdr.nlmsg_len)()
+        buf = (c_byte*hdr.nlmsg_len)()
         memmove(buf, _hdr, hdr.nlmsg_len)
         return nlmsghdr.from_buffer(buf)
 
     def read_message(self, *, timeout=None):
-        read_op = functools.partial(snl_read_message, addressof(self.ss))
+        read_op = lambda:snl_read_message(addressof(self.ss))
         _hdr = self._read_with_timeout(read_op, timeout)
         assert _hdr
         return SNL._copy_hdr(_hdr)
 
     def read_reply(self, nlmsg_seq, *, timeout=None):
-        read_op = functools.partial(snl_read_reply, addressof(self.ss), nlmsg_seq)
+        read_op = lambda:snl_read_reply(addressof(self.ss), nlmsg_seq)
         _hdr = self._read_with_timeout(read_op, timeout)
         assert _hdr
         return SNL._copy_hdr(_hdr)
@@ -276,7 +275,7 @@ class SNL:
 
     def read_reply_multi(self, nlmsg_seq, *, timeout=None):
         e = snl_errmsg_data()
-        read_op = functools.partial(snl_read_reply_multi, addressof(self.ss), nlmsg_seq, addressof(e))
+        read_op = lambda:snl_read_reply_multi(addressof(self.ss), nlmsg_seq, addressof(e))
         _hdr = self._read_with_timeout(read_op, timeout)
         if e.error:
             SNL._handle_error(e)
@@ -284,7 +283,7 @@ class SNL:
 
     def read_reply_code(self, nlmsg_seq, *, timeout=None):
         e = snl_errmsg_data()
-        read_op = functools.partial(snl_read_reply_code, addressof(self.ss), nlmsg_seq, addressof(e))
+        read_op = lambda:snl_read_reply_code(addressof(self.ss), nlmsg_seq, addressof(e))
         rc = self._read_with_timeout(read_op, timeout)
         if e.error:
             SNL._handle_error(e)
@@ -326,7 +325,7 @@ class SNLWriter:
         self.finalized = False
 
     def reserve_msg_data_raw(self, sz):
-        buf = (c_char*sz)()
+        buf = (c_byte*sz)()
         def op():
             p = c_void_p(snl_reserve_msg_data_raw(addressof(self.nw), sz))
             assert not self.nw.error
@@ -339,9 +338,11 @@ class SNLWriter:
         p = self.reserve_msg_data_raw(sizeof(t))
         return t.from_address(p.value)
 
-    def add_msg_attr(self, attr_type, attr_len, data):
+    def add_msg_attr(self, attr_type, data):
+        attr_len = sizeof(data)
+        data_copy = (c_byte*attr_len).from_buffer_copy(data)
         def op():
-            rc = snl_add_msg_attr(addressof(self.nw), attr_type, attr_len, addressof(data))
+            rc = snl_add_msg_attr(addressof(self.nw), attr_type, attr_len, addressof(data_copy))
             assert not self.nw.error
             assert rc
         self.ops.append(op)
@@ -357,6 +358,7 @@ class SNLWriter:
             assert _hdr
             h = nlmsghdr.from_address(_hdr)
             # TODO certain fields are created already, this overwrites them
+            #   this is currently handled by special casing above, eww
             memmove(_hdr, addressof(hdr), sizeof(hdr))
         self.ops.append(op)
         return hdr
@@ -372,14 +374,13 @@ class SNLWriter:
             assert not self.nw.error
             assert _hdr
             hdr = nlmsghdr.from_address(_hdr)
-            buf = (c_char*hdr.nlmsg_len)()
+            buf = (c_byte*hdr.nlmsg_len)()
             memmove(buf, addressof(hdr), hdr.nlmsg_len)
             return nlmsghdr.from_buffer(buf)
         finally:
             self.snl._clear_lb()
 
 Parser = namedtuple('Parser', ['c_fn_p', 't'])
-
 snl_rtm_link_parser_simple = Parser(snl_rtm_link_parser_simple, snl_parsed_link_simple)
 snl_rtm_addr_parser = Parser(snl_rtm_addr_parser, snl_parsed_addr)
 snl_rtm_route_parser = Parser(snl_rtm_route_parser, snl_parsed_route)

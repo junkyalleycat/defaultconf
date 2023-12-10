@@ -52,15 +52,13 @@ def dump_addrs():
     while hdr := snl.read_reply_multi(hdr.nlmsg_seq):
         yield parse_nlmsg_addr(snl, hdr)
 
-def dump_routes():
+def dump_routes(*, fib=0):
     snl = SNL(NETLINK_ROUTE, read_timeout=1)
     nw = snl.new_writer()
     hdr = nw.create_msg_request(RTM_GETROUTE)
     hdr.nlmsg_flags |= NLM_F_DUMP
-# TODO fib
-# nw.reserve_msg_object(rtmsg)
-# nw.reserve_msg_object(nlattr)
-# nw.reserve_msg_object(c_uint32)
+    rtm = nw.reserve_msg_object(rtmsg)
+    nw.add_msg_attr(RTA_TABLE, c_uint32(fib))
     hdr = nw.finalize_msg()
 
     snl.send_message(hdr)
@@ -122,30 +120,28 @@ class Link(namedtuple('Link', ['name', 'index', 'up'])):
         up_flag = bool(s.ifi_flags & IFF_UP)
         return Link(name, s.ifi_index, up_flag) 
 
-class LinkAddress(namedtuple('LinkAddress', ['link_index', 'local', 'address', 'prefixlen'])):
+class LinkAddress(namedtuple('LinkAddress', ['link_index', 'address'])):
 
     @staticmethod
     def from_snl_parsed_addr(s):
         local = parse_addr(s.ifa_local.contents) if s.ifa_local else None
-        addr = parse_addr(s.ifa_address.contents)
+        # NOTE, this project doesn't need the peer address
+        addr = parse_addr(s.ifa_address.contents) if local is None else local
         ifaceaddr = ip_interface((addr, s.ifa_prefixlen,))
-        return LinkAddress(s.ifa_index, local, ifaceaddr, s.ifa_prefixlen)
+        return LinkAddress(s.ifa_index, ifaceaddr)
 
-class Route(namedtuple('Route', ['dst', 'gw', 'prefixlen', 'link_index', 'host'])):
+class Route(namedtuple('Route', ['dst', 'gw', 'link_index'])):
 
     @staticmethod
     def from_snl_parsed_route(s):
         if s.rta_multipath.num_nhops != 0:
             raise Exception()
-        host_flag = bool(s.rta_rtflags & RTF_HOST)
-        dst = parse_addr(s.rta_dst.contents)
-        if not host_flag:
-            dst = ip_network((dst, s.rtm_dst_len,))
+        dst = ip_network((parse_addr(s.rta_dst.contents), s.rtm_dst_len))
         if s.rta_rtflags & RTF_GATEWAY:
             gw = parse_addr(s.rta_gw.contents)
         else:
             gw = None
-        return Route(dst, gw, s.rtm_dst_len, s.rta_oif, host_flag)
+        return Route(dst, gw, s.rta_oif)
 
 class NetTables:
 
@@ -238,22 +234,22 @@ def do_route(fib, cmd, flags, dst, gw, if_idx):
     rtm.rtm_dst_len = dst.prefixlen
 
     dst_packed = dst.network_address.packed
-    dst_data = (c_ubyte*len(dst_packed)).from_buffer_copy(dst_packed)
-    nw.add_msg_attr(RTA_DST, sizeof(dst_data), dst_data) 
-    nw.add_msg_attr(RTA_TABLE, sizeof(c_uint32), c_uint32(fib))
+    dst_data = (c_byte*len(dst_packed)).from_buffer_copy(dst_packed)
+    nw.add_msg_attr(RTA_DST, dst_data) 
+    nw.add_msg_attr(RTA_TABLE, c_uint32(fib))
 
     # the netlink rtm.rtm_protocol seems to be ignored
     rtm_flags = RTF_STATIC 
-    nw.add_msg_attr(NL_RTA_RTFLAGS, sizeof(c_uint32), c_uint32(rtm_flags))
+    nw.add_msg_attr(NL_RTA_RTFLAGS, c_uint32(rtm_flags))
 
     if gw:
         assert addr_to_af(dst) == addr_to_af(gw)
-        gw_data = (c_ubyte*len(gw.packed)).from_buffer_copy(gw.packed)
-        nw.add_msg_attr(RTA_GATEWAY, sizeof(gw_data), gw_data)
+        gw_data = (c_byte*len(gw.packed)).from_buffer_copy(gw.packed)
+        nw.add_msg_attr(RTA_GATEWAY, gw_data)
 
     # this is optional, but i should provide to be explicit
     if if_idx:
-        nw.add_msg_attr(RTA_OIF, sizeof(c_uint32), c_uint32(if_idx))
+        nw.add_msg_attr(RTA_OIF, c_uint32(if_idx))
 
     hdr = nw.finalize_msg()
     snl.send_message(hdr)
@@ -266,7 +262,7 @@ def if_nametoindex_nl(ifname):
     hdr = nw.create_msg_request(RTM_GETLINK)
     nw.reserve_msg_object(ifinfomsg)
     data = create_string_buffer(ifname.encode())
-    nw.add_msg_attr(IFLA_IFNAME, sizeof(data), data)
+    nw.add_msg_attr(IFLA_IFNAME, data)
     hdr = nw.finalize_msg()
 
     snl.send_message(hdr)
@@ -354,7 +350,8 @@ def main():
     subparser.add_argument('-f', metavar='fib', type=int, default=0)
     subparsers.add_parser('dump-links')
     subparsers.add_parser('dump-addrs')
-    subparsers.add_parser('dump-routes')
+    subparser = subparsers.add_parser('dump-routes')
+    subparser.add_argument('-f', metavar='fib', type=int, default=0)
     subparsers.add_parser('monitor-nl')
     subparser = subparsers.add_parser('if_nametoindex_nl')
     subparser.add_argument('link')
@@ -375,7 +372,7 @@ def main():
             a = LinkAddress.from_snl_parsed_addr(addr)
             print(a)
     elif args.action == 'dump-routes':
-        for route in dump_routes():
+        for route in dump_routes(fib=args.f):
             r = Route.from_snl_parsed_route(route)
             print(r)
     elif args.action == 'monitor-nl':
