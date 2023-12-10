@@ -27,6 +27,10 @@ class Trigger:
     def acquire(self, blocking=True, timeout=None):
         return self.s.acquire(blocking=blocking, timeout=timeout)
 
+# test the presented default
+#   1) is the link up?
+#   2) is there a link address to support it?
+#   3) is there a route to support it?
 def default_test(nettables, default):
     # filter links to link name
     try:
@@ -55,7 +59,7 @@ def default_test(nettables, default):
 
     return False
 
-def normalize_default(defaultconf, nettables, snl, fib, af, af_default_dst):
+def harmonize_default(defaultconf, nettables, snl, fib, af, af_default_dst):
     defaults = defaultconf.get_defaults(GatewaySelect(af=af))
     pdefault_test = functools.partial(default_test, nettables)
     default = next(iter(filter(pdefault_test, defaults)), None)
@@ -135,11 +139,11 @@ def daemon(config):
             logging.debug("triggered")
             fib = config.fib
             try:
-                normalize_default(defaultconf, nettables, snl, fib, socket.AF_INET, inet4_default_dst)
+                harmonize_default(defaultconf, nettables, snl, fib, socket.AF_INET, inet4_default_dst)
             except Exception as e:
                 logging.error(e)
             try:
-                normalize_default(defaultconf, nettables, snl, fib, socket.AF_INET6, inet6_default_dst)
+                harmonize_default(defaultconf, nettables, snl, fib, socket.AF_INET6, inet6_default_dst)
             except Exception as e:
                 logging.error(e)
 
