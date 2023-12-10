@@ -50,7 +50,7 @@ def default_test(nettables, default):
     # TODO the hops could be across ifs right?
     linkroutes = nettables.get_routes(lambda e: e.link_index == link.index)
     for route in linkroutes:
-        if default.addr in route.dst.network:
+        if default.addr in route.dst:
             return True
 
     return False
@@ -83,7 +83,7 @@ def normalize_default(defaultconf, nettables, snl, fib, af, af_default_dst):
             else:
                 logging.debug("default!=null, current_default!=null, default!=current_default, UPDATE")
                 bsdnetlink.delete_route(snl, fib, current_default.dst, current_default.gw, current_default.link_index)
-                bsdnetlink.add_route(snl, fib, af_default_dst, default.addr, link_index)
+                bsdnetlink.new_route(snl, fib, af_default_dst, default.addr, link_index)
 
 def daemon(config):
     logging.basicConfig(level=logging.DEBUG)
