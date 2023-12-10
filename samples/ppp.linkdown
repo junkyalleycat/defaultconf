@@ -1,0 +1,2 @@
+clnet:
+  ! /opt/defaultconf/bin/defaultconf remove -f inet -l cltun -p ppp HISADDR

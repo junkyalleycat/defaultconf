@@ -1,0 +1,8 @@
+#!/bin/sh
+
+if [ -n "${new_routers}" ]; then
+  set ${new_routers}
+  /opt/defaultconf/bin/defaultconf add -f inet -l ${interface} -p dhcp $1
+  unset ${new_routers}
+fi
+
