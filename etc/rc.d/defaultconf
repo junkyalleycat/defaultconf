@@ -1,0 +1,21 @@
+#!/bin/sh
+
+# PROVIDE: defaultconf
+# REQUIRE: DAEMON
+# KEYWORD: shutdown
+
+export PATH=/usr/local/bin:$PATH
+
+. /etc/rc.subr
+
+name="defaultconf"
+rcvar="${name}_enable"
+
+load_rc_config ${name}
+: ${dnstap_enable:=NO}
+
+pidfile="/var/run/${name}.pid"
+command="/usr/sbin/daemon"
+command_args="-c -r -t ${name} -S -T ${name} -P ${pidfile} /usr/local/bin/defaultconf daemon"
+
+run_rc_command "$1"
