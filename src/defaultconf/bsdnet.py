@@ -215,14 +215,22 @@ class snl_writer(Structure):
 class SNL:
 
     def __init__(self, netlink_family, *, read_timeout=None):
-        self.ss = snl_state()
-        snl_init(addressof(self.ss), netlink_family)
-        self.ss_s = socket.fromfd(self.ss.fd, AF_NETLINK, socket.SOCK_RAW)
+        ss = snl_state()
+        snl_init(addressof(ss), netlink_family)
+        self.ss = ss
+        self.ss_s = socket.socket(AF_NETLINK, socket.SOCK_RAW, 0, self.ss.fd)
         # not using python settimeout because it works very differently
         # (puts socket into non-blocking and uses select, which means the timeout is near 0)
         c_read_timeout = timeval(tv_sec=1, tv_usec=0)
         self.ss_s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, c_read_timeout)
         self.read_timeout = read_timeout
+        self.deleted = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.__del__() 
 
     def get_socket(self):
         return self.ss_s
@@ -307,7 +315,11 @@ class SNL:
         snl_clear_lb(addressof(self.ss))
 
     def __del__(self):
-        snl_free(addressof(self.ss))
+        # for safety we don't assume that ss was set
+        ss = getattr(self, 'ss', None)
+        if ss:
+            delattr(self, 'ss')
+            snl_free(addressof(ss))
 
 # NOTE
 #   This odd class records a series of operations on an SNLWriter, but doesn't

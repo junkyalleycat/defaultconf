@@ -55,11 +55,11 @@ def default_test(nettables, default):
 
     return False
 
-def normalize_default(defaultconf, nettables, fib, af, af_default_dst):
+def normalize_default(defaultconf, nettables, snl, fib, af, af_default_dst):
     defaults = defaultconf.get_defaults(GatewaySelect(af=af))
     pdefault_test = functools.partial(default_test, nettables)
     default = next(iter(filter(pdefault_test, defaults)), None)
-    link_index = None if default is None else bsdnetlink.if_nametoindex_nl(default.link)
+    link_index = None if default is None else bsdnetlink.if_nametoindex(snl, default.link)
     current_default = None
     try:
         current_default, = nettables.get_routes(lambda r: r.dst == af_default_dst)
@@ -69,23 +69,24 @@ def normalize_default(defaultconf, nettables, fib, af, af_default_dst):
         pass
     if default is None:
         if current_default is None:
-            print("default==null, current_default==null, NOOP")
+            logging.debug("default==null, current_default==null, NOOP")
         else:
-            print("default==null, current_default!=null, DELETE")
-            bsdnetlink.delete_route(fib, current_default.dst, current_default.gw, current_default.link_index)
+            logging.debug("default==null, current_default!=null, DELETE")
+            bsdnetlink.delete_route(snl, fib, current_default.dst, current_default.gw, current_default.link_index)
     else:
         if current_default is None:
-            print("default!=null, current_default!=null, SET")
-            bsdnetlink.new_route(fib, af_default_dst, default.addr, link_index)
+            logging.debug("default!=null, current_default!=null, SET")
+            bsdnetlink.new_route(snl, fib, af_default_dst, default.addr, link_index)
         else:
             if current_default.gw == default.addr:
-                print("default!=null, current_default!=null, default==current_default, NOOP")
+                logging.debug("default!=null, current_default!=null, default==current_default, NOOP")
             else:
-                print("default!=null, current_default!=null, default!=current_default, UPDATE")
-                bsdnetlink.delete_route(fib, current_default.dst, current_default.gw, current_default.link_index)
-                bsdnetlink.add_route(fib, af_default_dst, default.addr, link_index)
+                logging.debug("default!=null, current_default!=null, default!=current_default, UPDATE")
+                bsdnetlink.delete_route(snl, fib, current_default.dst, current_default.gw, current_default.link_index)
+                bsdnetlink.add_route(snl, fib, af_default_dst, default.addr, link_index)
 
 def daemon(config):
+    logging.basicConfig(level=logging.DEBUG)
     config.pid_path.write_text(str(os.getpid()))
     defaultconf = DefaultConf(config)
 
@@ -127,17 +128,18 @@ def daemon(config):
     inet4_default_dst = ipaddress.ip_network('0.0.0.0/0')
     inet6_default_dst = ipaddress.ip_network('::/0')
     def monitor():
+        snl = bsdnetlink.SNL(bsdnetlink.NETLINK_ROUTE, read_timeout=1)
         while not finish_ev.is_set():
             if not trigger_ev.acquire(timeout=1):
                 continue
-            print("TRIGGERED!")
+            logging.debug("triggered")
             fib = config.fib
             try:
-                normalize_default(defaultconf, nettables, fib, socket.AF_INET, inet4_default_dst)
+                normalize_default(defaultconf, nettables, snl, fib, socket.AF_INET, inet4_default_dst)
             except Exception as e:
                 logging.error(e)
             try:
-                normalize_default(defaultconf, nettables, fib, socket.AF_INET6, inet6_default_dst)
+                normalize_default(defaultconf, nettables, snl, fib, socket.AF_INET6, inet6_default_dst)
             except Exception as e:
                 logging.error(e)
 
