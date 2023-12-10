@@ -63,8 +63,8 @@ class GatewaySelect(namedtuple('GatewaySelect', ['af', 'link', 'protocol'],
             data['af'] = self.af.name
         return data
 
-class Config(namedtuple('Config', ['state_path', 'priority', 'pid_path'],
-            defaults=[default_state_path, [], default_pid_path])):
+class Config(namedtuple('Config', ['state_path', 'priority', 'pid_path', 'fib'],
+            defaults=[default_state_path, [], default_pid_path, 0])):
     
     @staticmethod
     def from_data(data):

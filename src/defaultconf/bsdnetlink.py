@@ -17,6 +17,8 @@ import argparse
 
 from .bsdnet import *
 
+# TODO fib shit
+
 def digest(b):
     return sha256(b).hexdigest()
 
@@ -52,7 +54,8 @@ def dump_addrs():
     while hdr := snl.read_reply_multi(hdr.nlmsg_seq):
         yield parse_nlmsg_addr(snl, hdr)
 
-def dump_routes(*, fib=0):
+def dump_routes(*, fib=None):
+    fib = 0 if fib is None else fib
     snl = SNL(NETLINK_ROUTE, read_timeout=1)
     nw = snl.new_writer()
     hdr = nw.create_msg_request(RTM_GETROUTE)
@@ -149,62 +152,57 @@ class NetTables:
 
     def __init__(self):
         self.lock = threading.RLock()
-        self.links = {}
+        self.links = set()
         self.routes = set()
+        self.addrs = set()
 
     def new_link(self, link):
         with self.lock:
-            if link.index in self.links:
-                addrs = self.links[link.index].addrs
-                self.links[link.index] = NetTables.LinkAddresses(link, addrs)
-            else:
-                self.links[link.index] = NetTables.LinkAddresses(link, set())
+            self.del_link(link)
+            self.links.update({link})
 
     def del_link(self, link):
         with self.lock:
-            if link.index in self.links:
-                del self.links[link.index]
-            self.routes.difference_update(set(filter(lambda e: e.link_index == link.index, self.routes)))
-
-    def new_addr(self, a):
-        with self.lock:
-            link = self.links[a.link_index]
-            link.addrs.update({a})
-
-    def del_addr(self, a):
-        with self.lock:
-            link = self.links[a.link_index]
-            link.addrs.difference_update({a})
+            to_remove = set(filter(lambda e: e.index == link.index, self.links))
+            self.links.difference_update(to_remove)
 
     def get_links(self, p):
         with self.lock:
-            return list(filter(p, self.links.values()))
+            return set(filter(p, self.links))
 
-    # TODO filter out pinned routes, we can't control them anyways
-    def new_route(self, r):
+    def new_addr(self, addr):
         with self.lock:
-            self.routes |= {r}
+            self.addrs.update({addr})
 
-    def del_route(self, r):
+    def del_addr(self, addr):
         with self.lock:
-            self.routes -= {r}
+            self.addrs.difference_update({addr})
+
+    def get_addrs(self, p):
+        with self.lock:
+            return set(filter(p, self.addrs))
+
+    def new_route(self, route):
+        with self.lock:
+            self.routes.update({route})
+
+    def del_route(self, route):
+        with self.lock:
+            self.routes.difference_update({route})
 
     def get_routes(self, p):
         with self.lock:
             return set(filter(p, self.routes))
 
-    def get_link_addrs(self):
-        return dict(self.links)
-
 class JSONEncoder(json.JSONEncoder):
 
     def default(self, o):
-        if type(o) is IPv4Address:
+        if type(o) in [IPv4Address, IPv4Network, IPv4Interface]:
             return str(o)
-        elif type(o) is IPv6Address:
+        elif type(o) in [IPv6Address, IPv6Network, IPv6Interface]:
             return str(o)
         elif type(o) is NetTables:
-            return { 'links': o.links, 'routes': o.routes }
+            return { 'links': o.links, 'routes': o.routes, 'addrs': o.addrs }
         elif type(o) is set:
             return list(o)
         return json.JSONEncoder.default(self, o)
@@ -270,20 +268,14 @@ def if_nametoindex_nl(ifname):
     snl.read_reply_multi(hdr.nlmsg_seq)
     return snl.parse_nlmsg(hdr, snl_rtm_link_parser_simple).ifi_index
 
-def new_route(fib, dst, gw, iface):
+def new_route(fib, dst, gw, if_idx):
     nl_cmd = RTM_NEWROUTE
     nl_flags = NLM_F_CREATE | NLM_F_EXCL
-
-    if_idx = None if iface is None else if_nametoindex_nl(iface)
-
     do_route(fib, nl_cmd, nl_flags, dst, gw, if_idx)
 
-def delete_route(fib, dst, gw, iface):
+def delete_route(fib, dst, gw, if_idx):
     nl_cmd = RTM_DELROUTE
     nl_flags = 0
-
-    if_idx = None if iface is None else if_nametoindex_nl(iface)
-
     do_route(fib, nl_cmd, nl_flags, dst, gw, if_idx)
 
 def maintain_nettables(finish, trigger_ev, nettables):
@@ -308,7 +300,7 @@ def maintain_nettables(finish, trigger_ev, nettables):
     def nlmsg_handler():
         while not finish.is_set():
             try:
-                nlmsg_type, nlmsg = nlmsg_q.get(read_timeout=1)
+                nlmsg_type, nlmsg = nlmsg_q.get(timeout=1)
             except queue.Empty:
                 continue
             if nlmsg_type == RTM_NEWLINK:
@@ -325,6 +317,8 @@ def maintain_nettables(finish, trigger_ev, nettables):
                 nettables.del_route(Route.from_snl_parsed_route(nlmsg))
             else:
                 logging.error(f'unknown nlmsg_type: {nlmsg_type}')
+#            print(json.dumps(nettables, cls=JSONEncoder))
+#            print()
             trigger_ev.release()
     tasks.append(executor.submit(nlmsg_handler))
 
@@ -355,14 +349,17 @@ def main():
     subparsers.add_parser('monitor-nl')
     subparser = subparsers.add_parser('if_nametoindex_nl')
     subparser.add_argument('link')
+    subparsers.add_parser('nettables')
     args = parser.parse_args()
 
     if args.action is None:
         raise Exception('action not specified')
     elif args.action == 'new-route':
-        new_route(args.f, args.d, args.g, args.i)
+        if_idx = None if args.i is None else if_nametoindex_nl(args.i)
+        new_route(args.f, args.d, args.g, if_idx)
     elif args.action == 'delete-route':
-        delete_route(args.f, args.d, args.g, args.i)
+        if_idx = None if args.i is None else if_nametoindex_nl(args.i)
+        delete_route(args.f, args.d, args.g, if_idx)
     elif args.action == 'dump-links':
         for link in dump_links():
             l = Link.from_snl_parsed_link_simple(link)
@@ -381,6 +378,13 @@ def main():
             print(nlmsg)
         monitor_nl(ev, handler)
     elif args.action == 'if_nametoindex_nl':
+        print(if_nametoindex_nl(args.link))
+    elif args.action == 'nettables':
+        finish = threading.Event()
+        class BLAH:
+            def release(self): pass
+        nettables = NetTables()
+        maintain_nettables(finish, BLAH(), nettables)
         print(if_nametoindex_nl(args.link))
     else:
         raise Exception(f'unknown action: {args.action}')

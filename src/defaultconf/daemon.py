@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import functools
 import os
 import logging
 import signal
@@ -25,6 +26,64 @@ class Trigger:
 
     def acquire(self, blocking=True, timeout=None):
         return self.s.acquire(blocking=blocking, timeout=timeout)
+
+def default_test(nettables, default):
+    # filter links to link name
+    try:
+        link, = nettables.get_links(lambda e: e.name == default.link)
+    except ValueError:
+        # catch too few and too many,
+        # TODO too many should never happen, consider throwing
+        return False
+
+    # skip if link isn't up
+    if not link.up:
+        return False
+
+    # filter until you find an addr that works
+    linkaddrs = nettables.get_addrs(lambda e: e.link_index == link.index)
+    for addr in linkaddrs:
+        if default.addr in addr.address.network:
+            return True
+
+    # filter all routes as next hops that support our case
+    # TODO the hops could be across ifs right?
+    linkroutes = nettables.get_routes(lambda e: e.link_index == link.index)
+    for route in linkroutes:
+        if default.addr in route.dst.network:
+            return True
+
+    return False
+
+def normalize_default(defaultconf, nettables, fib, af, af_default_dst):
+    defaults = defaultconf.get_defaults(GatewaySelect(af=af))
+    pdefault_test = functools.partial(default_test, nettables)
+    default = next(iter(filter(pdefault_test, defaults)), None)
+    link_index = None if default is None else bsdnetlink.if_nametoindex_nl(default.link)
+    current_default = None
+    try:
+        current_default, = nettables.get_routes(lambda r: r.dst == af_default_dst)
+    except ValueError:
+        # too few or too many
+        # TODO throw on too many?
+        pass
+    if default is None:
+        if current_default is None:
+            print("default==null, current_default==null, NOOP")
+        else:
+            print("default==null, current_default!=null, DELETE")
+            bsdnetlink.delete_route(fib, current_default.dst, current_default.gw, current_default.link_index)
+    else:
+        if current_default is None:
+            print("default!=null, current_default!=null, SET")
+            bsdnetlink.new_route(fib, af_default_dst, default.addr, link_index)
+        else:
+            if current_default.gw == default.addr:
+                print("default!=null, current_default!=null, default==current_default, NOOP")
+            else:
+                print("default!=null, current_default!=null, default!=current_default, UPDATE")
+                bsdnetlink.delete_route(fib, current_default.dst, current_default.gw, current_default.link_index)
+                bsdnetlink.add_route(fib, af_default_dst, default.addr, link_index)
 
 def daemon(config):
     config.pid_path.write_text(str(os.getpid()))
@@ -72,58 +131,15 @@ def daemon(config):
             if not trigger_ev.acquire(timeout=1):
                 continue
             print("TRIGGERED!")
-
-            def filter_defaults(af):
-                defaults = defaultconf.get_defaults(GatewaySelect(af=af))
-                found_default = None
-                for default in defaults:
-                    # filter links to link name
-                    try:
-                        linkaddrs, = nettables.get_links(lambda l: l.link.name == default.link)
-                    except ValueError:
-                        # catch too few and too many,
-                        # TODO too many should never happen, consider throwing
-                        continue
-                    # skip if link isn't up
-                    if not linkaddrs.link.up:
-                        continue
-                    # filter until you find an addr that works
-                    for addr in linkaddrs.addrs:
-                        if default.addr not in addr.address.network:
-                            continue
-                        found_default = default
-                        break
-                    if found_default:
-                        break
-                return found_default
-
-            inet4_default = filter_defaults(socket.AF_INET)
-            current_inet4_default = None
+            fib = config.fib
             try:
-                current_inet4_default, = nettables.get_routes(lambda r: r.dst == inet4_default_dst)
-            except ValueError:
-                # too few or too many
-                # TODO throw on too many?
-                pass
-            if inet4_default is None:
-                if current_inet4_default is None:
-                    print("default==null, current_default==null, NOOP")
-                else:
-                    print("default==null, current_default!=null, DELETE")
-            else:
-                if current_inet4_default is None:
-                    print("default!=null, current_default!=null, SET")
-                else:
-                    print(current_inet4_default.gw)
-                    print(inet4_default.addr)
-                    if current_inet4_default.gw == inet4_default.addr:
-                        print("default!=null, current_default!=null, default==current_default, NOOP")
-                    else:
-                        print("default!=null, current_default!=null, default!=current_default, UPDATE")
-#            print(current_inet4_default)
-
-#            print(filter_defaults(socket.AF_INET))
-#            print(filter_defaults(socket.AF_INET6))
+                normalize_default(defaultconf, nettables, fib, socket.AF_INET, inet4_default_dst)
+            except Exception as e:
+                logging.error(e)
+            try:
+                normalize_default(defaultconf, nettables, fib, socket.AF_INET6, inet6_default_dst)
+            except Exception as e:
+                logging.error(e)
 
     tasks.append(executor.submit(monitor))
 
