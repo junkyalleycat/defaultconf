@@ -90,7 +90,6 @@ def harmonize_default(defaultconf, nettables, snl, fib, af, af_default_dst):
                 bsdnetlink.new_route(snl, fib, af_default_dst, default.addr, link_index)
 
 def daemon(config):
-    logging.basicConfig(level=logging.DEBUG)
     config.pid_path.write_text(str(os.getpid()))
     defaultconf = DefaultConf(config)
 

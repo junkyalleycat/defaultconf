@@ -24,6 +24,7 @@ def parse_af(af):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', metavar='config-path', type=Path, default=default_config_path)
+    parser.add_argument('-d', action='store_true')
     subparsers = parser.add_subparsers(dest='action')
     subparser = subparsers.add_parser('add')
     subparser.add_argument('-f', metavar='address-family', required=True)
@@ -49,6 +50,11 @@ def main():
     subparser = subparsers.add_parser('daemon')
     subparser = subparsers.add_parser('signal-daemon')
     args = parser.parse_args()
+
+    if args.d:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
 
     config = Config.from_path(args.c)
 
